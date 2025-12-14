@@ -14,7 +14,7 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 
 ## 1分でわかる：Faiss ユーザー向け
 
-Faiss の API との対比は下記です。チュートリアルもご参照ください（`docs/tutorial.ja.md`）。
+Faiss の API との対比は下記です。チュートリアルもご参照ください（[`docs/tutorial.ja.md`](docs/tutorial.ja.md)）。
 
 | やりたいこと | Faiss | torch-ivf |
 |---|---|---|
@@ -84,8 +84,8 @@ python examples/ivf_demo.py --device cuda --verify
 ```
 
 2) チュートリアル（利用者向け）:
-- `docs/tutorial.ja.md`
-- `docs/tutorial.en.md`
+- [`docs/tutorial.ja.md`](docs/tutorial.ja.md)
+- [`docs/tutorial.en.md`](docs/tutorial.en.md)
 
 ---
 
@@ -100,12 +100,12 @@ python examples/ivf_demo.py --device cuda --verify
 
 ## ベンチマーク（スクリプト）
 
-- `scripts/benchmark.py`: torch-ivf ベンチ（CPU/ROCm）。JSON を出力し `benchmarks/benchmarks.jsonl` に追記
-- `scripts/benchmark_faiss_cpu.py`: faiss-cpu 参照ベンチ
-- `scripts/benchmark_sweep_nq.py`: `nq` スイープ（tiny-batch vs throughput の境界）
-- `scripts/benchmark_sweep_max_codes.py`: `max_codes` スイープ（速度/自己比較 recall）
-- `scripts/dump_env.py`: `benchmarks/env.json` を生成
-- `scripts/profile_ivf_search.py`: `IndexIVFFlat.search` の `torch.profiler` 表を表示
+- [`scripts/benchmark.py`](scripts/benchmark.py): torch-ivf ベンチ（CPU/ROCm）。JSON を出力し [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl) に追記
+- [`scripts/benchmark_faiss_cpu.py`](scripts/benchmark_faiss_cpu.py): faiss-cpu 参照ベンチ
+- [`scripts/benchmark_sweep_nq.py`](scripts/benchmark_sweep_nq.py): `nq` スイープ（tiny-batch vs throughput の境界）
+- [`scripts/benchmark_sweep_max_codes.py`](scripts/benchmark_sweep_max_codes.py): `max_codes` スイープ（速度/自己比較 recall）
+- [`scripts/dump_env.py`](scripts/dump_env.py): [`benchmarks/env.json`](benchmarks/env.json) を生成
+- [`scripts/profile_ivf_search.py`](scripts/profile_ivf_search.py): `IndexIVFFlat.search` の `torch.profiler` 表を表示
 
 ---
 
@@ -119,7 +119,7 @@ uv run python scripts/benchmark_sweep_nq.py --torch-device cuda --torch-search-m
 uv run python scripts/benchmark_sweep_max_codes.py --torch-device cuda --torch-search-mode csr
 ```
 
-結果は `benchmarks/benchmarks.jsonl` に追記されます。最新レコードに合わせて README の代表値を更新してください。
+結果は [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl) に追記されます。最新レコードに合わせて README の代表値を更新してください。
 
 ---
 
@@ -131,7 +131,7 @@ torch-ivf は、ただ距離計算を速くするだけではなく、IVF で支
 
 当てずっぽうの高速化を避けるため、`torch.profiler` でホットスポットを確認します。
 
-- 使うもの: `scripts/profile_ivf_search.py`
+- 使うもの: [`scripts/profile_ivf_search.py`](scripts/profile_ivf_search.py)
 - 見るポイント（典型例）:
   - `matrix` 側: `aten::index_select` / `aten::gather` / 大きい `aten::topk` が支配しやすい
   - `csr` 側: “ランダム参照（gather 系）” の比率が下がり、`slice` + GEMM が主体になりやすい
@@ -204,8 +204,8 @@ uv run pytest
 
 ## ドキュメント
 
-- `docs/concept.md` – 背景と狙い
-- `docs/spec.md` – 仕様（API/挙動）
-- `docs/plan.md` – 進捗チェックリスト
-- `docs/tutorial.ja.md` – チュートリアル（日本語）
-- `docs/tutorial.en.md` – Tutorial (English)
+- [`docs/concept.md`](docs/concept.md) – 背景と狙い
+- [`docs/spec.md`](docs/spec.md) – 仕様（API/挙動）
+- [`docs/plan.md`](docs/plan.md) – 進捗チェックリスト
+- [`docs/tutorial.ja.md`](docs/tutorial.ja.md) – チュートリアル（日本語）
+- [`docs/tutorial.en.md`](docs/tutorial.en.md) – Tutorial (English)
