@@ -6,7 +6,7 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 - ✅ **Faiss からの移行が簡単**（`IndexFlatL2/IP`, `IndexIVFFlat` 相当の API）
 - ✅ **速い条件がはっきりしている**（tiny-batch vs throughput の二相、`search_mode=auto`）
 - ✅ **PyTorch の backend が動けば同じコードで動く**（CUDA/ROCm/DirectML/CPU を統一）
-- ✅ **throughput 領域で faiss-cpu を最大 5x 超**（実測。結果は `benchmarks/benchmarks.jsonl` / `benchmarks/env.json` に記録）
+- ✅ **throughput 領域で faiss-cpu を最大 4.7x**（実測。結果は `benchmarks/benchmarks.jsonl` / `benchmarks/env.json` に記録）
 
 > English README: `README.md`
 
@@ -40,12 +40,14 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > 実行環境は `benchmarks/env.json` に保存（Windows / ROCm / PyTorch build など）  
 > 数値は `scripts/benchmark_sweep_nq.py` の出力（`search_ms` は median）を要約
+>
+> 更新日時: `2025-12-14T10:40:28`
 
 | nq | torch-ivf（ROCm GPU, matrix） | torch-ivf（ROCm GPU, csr） | faiss-cpu（CPU） |
 |---:|---:|---:|---:|
-| 512 | 3,269 QPS | **17,562 QPS** | 5,833 QPS |
-| 2,048 | 3,154 QPS | **31,242 QPS** | 7,810 QPS |
-| 19,600 | 3,114 QPS | **48,978 QPS** | 9,111 QPS |
+| 512 | 3,250 QPS | **17,656 QPS** | 7,140 QPS |
+| 2,048 | 3,105 QPS | **29,553 QPS** | 8,264 QPS |
+| 19,600 | 3,109 QPS | **47,302 QPS** | 9,962 QPS |
 
 ---
 
@@ -56,9 +58,9 @@ xychart-beta
     title "QPS vs nq (torch-ivf ROCm: matrix/csr, faiss-cpu)"
     x-axis [1, 8, 32, 128, 512, 2048, 19600]
     y-axis "QPS" 0 --> 60000
-    line "torch-ivf (matrix)" [722, 2055, 2882, 3122, 3269, 3154, 3114]
-    line "torch-ivf (csr)" [232, 547, 1253, 4632, 17562, 31242, 48978]
-    line "faiss-cpu" [2518, 3557, 4041, 5634, 5833, 7810, 9111]
+    line "torch-ivf (matrix)" [875, 2176, 2711, 3092, 3250, 3105, 3109]
+    line "torch-ivf (csr)" [275, 576, 1682, 5063, 17656, 29553, 47302]
+    line "faiss-cpu" [2241, 3628, 3767, 4887, 7140, 8264, 9962]
 ```
 
 ---
