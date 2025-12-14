@@ -23,7 +23,9 @@ torch-ivf does not force-install PyTorch because you may need a specific wheel v
    python examples/ivf_demo.py --device cuda --verify
    ```
    Use `--device cpu` / `--device cuda` / `--device dml` as needed. `--verify` compares against `IndexFlat`.
-2. Read the user tutorial (Japanese): `docs/tutorial.md`.
+2. Read the user tutorial:
+   - English: `docs/tutorial.en.md`
+   - Japanese: `docs/tutorial.ja.md`
 
 ## Development (uv)
 
@@ -65,7 +67,8 @@ for xb, _ in loader:
 - `docs/concept.md` – background and goals
 - `docs/spec.md` – API specification and behavior
 - `docs/plan.md` – checklist-style progress tracking
-- `docs/tutorial.md` – user tutorial (Japanese)
+- `docs/tutorial.en.md` – user tutorial (English)
+- `docs/tutorial.ja.md` – user tutorial (Japanese)
 
 ## Benchmarks
 
