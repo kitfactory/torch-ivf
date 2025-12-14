@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "PyTorch-native IVF index for CUDA/ROCm/DirectML/CPU."
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "torch-ivf contributors", email = "kitfactory@gmail.com" }]
+authors = [{ name = "Naruhide KITADA", email = "kitfactory@gmail.com" }]
 license = { text = "MIT" }
 dependencies = []
 
