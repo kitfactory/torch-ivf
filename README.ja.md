@@ -6,7 +6,7 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 - ✅ **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2/IP`, `IndexIVFFlat` 相当の API）
 - ✅ **速い条件がはっきりしている**（tiny-batch vs throughput の二相、`search_mode=auto`）
 - ✅ **PyTorch の backend が動けば同じコードで動く**（CUDA/ROCm/DirectML/CPU を統一、Linuxだけでなく **Windows** でも）
-- ✅ **throughput 領域で faiss-cpu を最大 4.7x**（下記の `nq=19600` 実測）
+- ✅ **throughput 領域で faiss-cpu を最大 4.7x**（`nq=19600` で 47,302 / 9,962 ≒ 4.75x）
 
 > English README: `README.md`
 
@@ -16,9 +16,13 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 
 Faiss の API との対比は下記です。チュートリアルもご参照ください（[`docs/tutorial.ja.md`](docs/tutorial.ja.md)）。
 
+```python
+from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
+```
+
 | やりたいこと | Faiss | torch-ivf |
 |---|---|---|
-| 全探索（L2/IP） | `faiss.IndexFlatL2 / IP` | `torch_ivf.index.IndexFlatL2 / IP` |
+| 全探索（L2/IP） | `faiss.IndexFlatL2 / faiss.IndexFlatIP` | `torch_ivf.index.IndexFlatL2 / torch_ivf.index.IndexFlatIP` |
 | IVF（L2/IP） | `faiss.IndexIVFFlat` | `torch_ivf.index.IndexIVFFlat` |
 | 速度チューニング | `nprobe` 等 | `nprobe` + `search_mode` + `max_codes` |
 
@@ -42,6 +46,8 @@ Faiss の API との対比は下記です。チュートリアルもご参照く
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > 実行環境: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
 > 更新日時: `2025-12-14T10:40:28`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
+>
+> ※この表は throughput 領域を見せるため `search_mode=csr` 固定です。通常利用は `search_mode=auto` 推奨です。
 
 | nq | torch-ivf（ROCm GPU, csr） | faiss-cpu（CPU） |
 |---:|---:|---:|
@@ -54,8 +60,6 @@ Faiss の API との対比は下記です。チュートリアルもご参照く
 赤: torch-ivf（ROCm GPU, csr） / 黒: faiss-cpu（CPU）
 
 ![QPS vs nq](docs/assets/qps_vs_nq.svg)
-
----
 
 ---
 
@@ -76,6 +80,26 @@ CUDA/ROCm/DirectML/CPU など、利用環境に合った PyTorch を **先に**�
 ---
 
 ## クイックスタート
+
+### 最小コード（自分のコードに埋め込む）
+
+```python
+import torch
+from torch_ivf.index import IndexIVFFlat
+
+d = 128
+xb = torch.randn(262144, d, device="cuda", dtype=torch.float32)
+xq = torch.randn(2048, d, device="cuda", dtype=torch.float32)
+
+index = IndexIVFFlat(d=d, nlist=512, metric="l2").to("cuda")
+index.search_mode = "auto"
+index.nprobe = 32
+index.train(xb[:20480])
+index.add(xb)
+
+dist, ids = index.search(xq, k=20)
+print(dist.shape, ids.shape)
+```
 
 1) 合成データのデモ（まず動作確認）:
 ```bash
