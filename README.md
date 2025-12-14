@@ -2,6 +2,8 @@
 
 torch-ivf is a PyTorch-native IVF (Inverted File Index) library that mimics the Faiss `IndexFlat` / `IndexIVFFlat` APIs while running on CPU, CUDA, ROCm, or DirectML from the same codebase. The project is developed primarily on Windows + ROCm PyTorch, so that GPU search workloads can run without switching libraries per vendor.
 
+> Japanese README: `README.ja.md`
+
 ## When It’s Fast (one-screen summary)
 
 - Tiny batches (e.g., `nq <= 32`): kernel launch overhead dominates; CPU or `search_mode=matrix` may win.
