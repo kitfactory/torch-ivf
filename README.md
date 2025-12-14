@@ -69,6 +69,7 @@ for xb, _ in loader:
 - `scripts/benchmark_faiss_cpu.py`: faiss-cpu reference benchmark.
 - `scripts/benchmark_sweep_nq.py`: sweep `nq` to reveal tiny-batch vs throughput regimes.
 - `scripts/dump_env.py`: dump a reproducible environment snapshot to `benchmarks/env.json`.
+- `scripts/profile_ivf_search.py`: print a short `torch.profiler` table for `IndexIVFFlat.search`.
 
 Example:
 ```bash
