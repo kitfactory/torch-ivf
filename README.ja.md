@@ -3,7 +3,7 @@
 **Faiss ライクに使える、PyTorch ネイティブ IVF。**  
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
 
-- ✅ **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2/IP`, `IndexIVFFlat` 相当の API）
+- ✅ **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
 - ✅ **速い条件がはっきりしている**（tiny-batch vs throughput の二相、`search_mode=auto`）
 - ✅ **PyTorch の backend が動けば同じコードで動く**（CUDA/ROCm/DirectML/CPU を統一、Linuxだけでなく **Windows** でも）
 - ✅ **throughput 領域で faiss-cpu を最大 4.7x**（`nq=19600` で 47,302 / 9,962 ≒ 4.75x）
@@ -37,7 +37,7 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 - **tiny-batch（例: `nq <= 32`）不得意**  
   カーネル起動オーバーヘッドが支配的になりやすく、CPU や `search_mode=matrix` が勝つことがあります。
 - **推奨設定**  
-  GPU では `search_mode="auto"` を既定にし、**可能ならクエリをまとめて投げてください**。
+  GPU では `search_mode="auto"` を既定にし、**可能ならクエリをまとめて投げてください**。auto は tiny-batch では軽い経路、throughput では `csr` を選ぶため、用途で悩みにくいです。
 
 ---
 
@@ -48,6 +48,7 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 > 更新日時: `2025-12-14T10:40:28`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
 >
 > ※この表は throughput 領域を見せるため `search_mode=csr` 固定です。通常利用は `search_mode=auto` 推奨です。
+> faiss-cpu は既定スレッド設定（環境依存）です。再現する場合は `OMP_NUM_THREADS` を固定してください。
 
 | nq | torch-ivf（ROCm GPU, csr） | faiss-cpu（CPU） |
 |---:|---:|---:|
@@ -99,6 +100,9 @@ index.add(xb)
 
 dist, ids = index.search(xq, k=20)
 print(dist.shape, ids.shape)
+
+# 速度/自己比較recallのトレードオフ（必要なときだけ）
+# index.max_codes = 32768
 ```
 
 1) 合成データのデモ（まず動作確認）:
