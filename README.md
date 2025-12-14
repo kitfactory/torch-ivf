@@ -4,6 +4,19 @@ torch-ivf is a PyTorch-native IVF (Inverted File Index) library that mimics the 
 
 ## Quick Start
 
+## Installation (PyTorch prerequisite)
+
+torch-ivf does not force-install PyTorch because you may need a specific wheel variant (CUDA/ROCm/DirectML/CPU).
+
+- If you already have PyTorch installed (recommended for CUDA/ROCm/DirectML), install torch-ivf:
+  ```bash
+  pip install torch-ivf
+  ```
+- If you want a quick CPU-only setup, you can let pip install a compatible PyTorch:
+  ```bash
+  pip install "torch-ivf[pytorch]"
+  ```
+
 1. Install dependencies (project uses `uv`).
    ```bash
    uv sync
