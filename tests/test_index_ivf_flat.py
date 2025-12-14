@@ -125,3 +125,21 @@ def test_ivf_max_codes_prefix_boundary_cases():
         assert tasks_q.to("cpu").tolist() == [0] * len(expected_lists)
         assert tasks_l.to("cpu").tolist() == expected_lists
         assert tasks_p.to("cpu").tolist() == expected_probes
+
+
+def test_ivf_search_csr_matches_matrix_when_max_codes_unlimited():
+    d = 16
+    xb, xq = _toy_data(d=d, nb=400, nq=16, seed=4)
+    index = IndexIVFFlat(d, nlist=16, nprobe=4)
+    index.train(xb)
+    index.add(xb)
+    index.max_codes = 0
+
+    index.search_mode = "matrix"
+    D_matrix, I_matrix = index.search(xq, k=5)
+
+    index.search_mode = "csr"
+    D_csr, I_csr = index.search(xq, k=5)
+
+    assert torch.allclose(D_matrix.cpu(), D_csr.cpu(), atol=1e-5)
+    assert torch.equal(I_matrix.cpu(), I_csr.cpu())
