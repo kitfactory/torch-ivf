@@ -16,16 +16,16 @@
 ## Now（次に潰す：優先順）
 
 ### 1) CSR vNext の仕上げ（互換・説明・残タスク）
-- [ ] **max_codes の prefix ルールを faiss-cpu と合わせる**
+- [x] **max_codes の prefix ルールを faiss-cpu と合わせる**
   - 既定: 先頭 list は必ず読む / list 境界で止める
   - 成果物: `docs/spec.md`
 - [x] 仕様テスト: max_codes の “境界ケース” で採用 list 数が期待どおりになるユニットテストを追加する（例: cum が max_codes-1 / max_codes / max_codes+1）。
   - 成果物: `tests/test_index_ivf_flat.py`
 - [x] fast-path: max_codes>0 でも “全クエリが剪定されない” 場合は max_codes=0 と同じルートに落とす（無駄計算を避ける）。
   - 成果物: `src/torch_ivf/index/ivf_flat.py`
-- [ ] 受け入れ条件: `max_codes=0` で旧パスと `recall@k` が一致（浮動小数差は許容）。
-- [ ] 受け入れ条件: profiler で `aten::index`（ランダム gather）が支配的でなくなる（slice ベース）。
-- [ ] ROCm(GPU) / faiss-cpu のベンチ（`nq=19600` と `max_codes` スイープ）を再取得し、`benchmarks/benchmarks.jsonl` / README を更新する。
+- [x] 受け入れ条件: `max_codes=0` で旧パスと `recall@k` が一致（浮動小数差は許容）。
+- [x] 受け入れ条件: profiler で `aten::index`（ランダム gather）が支配的でなくなる（slice ベース）。
+- [x] ROCm(GPU) / faiss-cpu のベンチ（`nq=19600` と `max_codes` スイープ）を再取得し、`benchmarks/benchmarks.jsonl` / README を更新する。
   - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`
 
 ### 2) add の高速化（第3優先）
