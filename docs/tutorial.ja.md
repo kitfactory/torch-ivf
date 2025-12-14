@@ -57,7 +57,11 @@ from torch_ivf.index import IndexIVFFlat
 
 d = 128
 device = "cuda" if torch.cuda.is_available() else "cpu"
-# ROCm/DirectML を使う場合も、PyTorch が認識できる device 文字列を指定します。
+# ROCm: PyTorch 的には device="cuda" のままで OK（ROCm でも torch.cuda.is_available() が True になる想定）
+# DirectML: 環境によって torch-directml 側の device オブジェクトを使うことがあるため、公式手順に従ってください。
+# 例（環境による）:
+# import torch_directml
+# device = torch_directml.device()
 
 xb = torch.randn(200000, d, device=device)
 xq = torch.randn(4096, d, device=device)
@@ -66,7 +70,11 @@ index = IndexIVFFlat(d=d, nlist=512, nprobe=32, metric="l2").to(device)
 index.search_mode = "auto"
 index.train(xb[:20480])
 index.add(xb)
-D, I = index.search(xq, k=20)
+#
+# nprobe は「覗きにいく list の数」です。増やすと recall は上がりやすい一方、遅くなりやすいです。
+#
+with torch.inference_mode():
+    D, I = index.search(xq, k=20)
 ```
 
 ## 4. `search_mode`（matrix / csr / auto）
