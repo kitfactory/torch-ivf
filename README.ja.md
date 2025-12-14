@@ -3,16 +3,18 @@
 **Faiss ライクに使える、PyTorch ネイティブ IVF。**  
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
 
-- ✅ **Faiss からの移行が簡単**（`IndexFlatL2/IP`, `IndexIVFFlat` 相当の API）
+- ✅ **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2/IP`, `IndexIVFFlat` 相当の API）
 - ✅ **速い条件がはっきりしている**（tiny-batch vs throughput の二相、`search_mode=auto`）
-- ✅ **PyTorch の backend が動けば同じコードで動く**（CUDA/ROCm/DirectML/CPU を統一）
-- ✅ **throughput 領域で faiss-cpu を最大 4.7x**（実測。結果は `benchmarks/benchmarks.jsonl` / `benchmarks/env.json` に記録）
+- ✅ **PyTorch の backend が動けば同じコードで動く**（CUDA/ROCm/DirectML/CPU を統一、Linuxだけでなく **Windows** でも）
+- ✅ **throughput 領域で faiss-cpu を最大 4.7x**（下記の `nq=19600` 実測）
 
 > English README: `README.md`
 
 ---
 
 ## 1分でわかる：Faiss ユーザー向け
+
+Faiss の API との対比は下記です。チュートリアルもご参照ください（`docs/tutorial.ja.md`）。
 
 | やりたいこと | Faiss | torch-ivf |
 |---|---|---|
@@ -24,13 +26,13 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 
 ---
 
-## どこで速い？（1枚まとめ）
+## どういった領域で速いか？（1枚まとめ）
 
-- **tiny-batch（例: `nq <= 32`）**  
-  カーネル起動オーバーヘッドが支配的になりやすく、CPU や `search_mode=matrix` が勝つことがあります。
-- **throughput（例: `nq >= 512`）**  
+- **throughput（例: `nq >= 512`）　得意**  
   `search_mode=csr` が効きやすく、**faiss-cpu を複数倍上回る**ケースがあります。
-- **推奨**  
+- **tiny-batch（例: `nq <= 32`）不得意**  
+  カーネル起動オーバーヘッドが支配的になりやすく、CPU や `search_mode=matrix` が勝つことがあります。
+- **推奨設定**  
   GPU では `search_mode="auto"` を既定にし、**可能ならクエリをまとめて投げてください**。
 
 ---
@@ -38,27 +40,22 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 ## 実測（代表値）
 
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
-> 実行環境は `benchmarks/env.json` に保存（Windows / ROCm / PyTorch build など）  
-> 数値は `scripts/benchmark_sweep_nq.py` の出力（`search_ms` は median）を要約
->
-> 更新日時: `2025-12-14T10:40:28`
+> 実行環境: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
+> 更新日時: `2025-12-14T10:40:28`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
 
-| nq | torch-ivf（ROCm GPU, matrix） | torch-ivf（ROCm GPU, csr） | faiss-cpu（CPU） |
-|---:|---:|---:|---:|
-| 512 | 3,250 QPS | **17,656 QPS** | 7,140 QPS |
-| 2,048 | 3,105 QPS | **29,553 QPS** | 8,264 QPS |
-| 19,600 | 3,109 QPS | **47,302 QPS** | 9,962 QPS |
+| nq | torch-ivf（ROCm GPU, csr） | faiss-cpu（CPU） |
+|---:|---:|---:|
+| 512 | **17,656 QPS** | 7,140 QPS |
+| 2,048 | **29,553 QPS** | 8,264 QPS |
+| 19,600 | **47,302 QPS** | 9,962 QPS |
 
----
-
-## グラフ：QPS vs nq（tiny-batch → throughput）
+### グラフ：QPS vs nq（tiny-batch → throughput）
 
 ```mermaid
 xychart-beta
     title "QPS vs nq (torch-ivf ROCm: matrix/csr, faiss-cpu)"
     x-axis [1, 8, 32, 128, 512, 2048, 19600]
     y-axis "QPS" 0 --> 60000
-    line "torch-ivf (matrix)" [875, 2176, 2711, 3092, 3250, 3105, 3109]
     line "torch-ivf (csr)" [275, 576, 1682, 5063, 17656, 29553, 47302]
     line "faiss-cpu" [2241, 3628, 3767, 4887, 7140, 8264, 9962]
 ```
