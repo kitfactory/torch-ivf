@@ -180,15 +180,15 @@ ROCm/CUDA の BLAS（rocBLAS/cuBLAS）を活かしやすい形なので、GPU �
 
 ```mermaid
 flowchart TD
-  Q[Query Q (nq x d)] --> Coarse[Coarse: centroid topk (nprobe)]
-  Coarse --> Lists[Probed list ids (nq x nprobe)]
-  Lists --> Tasks[Tasks: (query_id, list_id)]
-  Tasks --> Group[Group by list_id]
-  Group --> Slice[Slice: packed_embeddings[start:end]]
-  Slice --> GEMM[Scores/Dist via GEMM]
-  GEMM --> LocalTopk[local topk(k)]
-  LocalTopk --> Merge[merge to global top-k]
-  Merge --> Out[Distances/Ids (nq x k)]
+  Q["Query Q: nq x d"] --> Coarse["Coarse: centroid topk (nprobe)"]
+  Coarse --> Lists["Probed list ids: nq x nprobe"]
+  Lists --> Tasks["Tasks: query_id, list_id"]
+  Tasks --> Group["Group by list_id"]
+  Group --> Slice["Slice packed_embeddings by list_offsets"]
+  Slice --> GEMM["Scores/Dist via GEMM: Q @ X.T"]
+  GEMM --> LocalTopk["local topk k per list"]
+  LocalTopk --> Merge["merge to global top-k"]
+  Merge --> Out["Distances/Ids: nq x k"]
 ```
 
 ---
