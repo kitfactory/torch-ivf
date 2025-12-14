@@ -51,14 +51,9 @@ Faiss の API との対比は下記です。チュートリアルもご参照く
 
 ### グラフ：QPS vs nq（tiny-batch → throughput）
 
-```mermaid
-xychart-beta
-    title "QPS vs nq (torch-ivf ROCm: matrix/csr, faiss-cpu)"
-    x-axis [1, 8, 32, 128, 512, 2048, 19600]
-    y-axis "QPS" 0 --> 60000
-    line "torch-ivf (csr)" [275, 576, 1682, 5063, 17656, 29553, 47302]
-    line "faiss-cpu" [2241, 3628, 3767, 4887, 7140, 8264, 9962]
-```
+赤: torch-ivf（ROCm GPU, csr） / 黒: faiss-cpu（CPU）
+
+![QPS vs nq](docs/assets/qps_vs_nq.svg)
 
 ---
 
