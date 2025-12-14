@@ -5,8 +5,8 @@ The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with
 
 - ✅ **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
 - ✅ **Up to 4.75x vs faiss-cpu in the throughput regime** (`nq=19600`: 47,302 / 9,962 ≒ 4.75x)
-- ✅ **Same code if your PyTorch backend runs** (unified CUDA/ROCm/DirectML/CPU, including **Windows**)
-- ✅ **Measured results + repro steps included** (bundled [`benchmarks/env.json`](benchmarks/env.json) / [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl) and benchmark scripts)
+- ✅ **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
+- ✅ **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
 
 > Japanese README: `README.ja.md`
 

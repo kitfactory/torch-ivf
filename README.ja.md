@@ -5,8 +5,8 @@ CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標�
 
 - ✅ **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
 - ✅ **throughput 領域で faiss-cpu を最大 4.75x**（`nq=19600` で 47,302 / 9,962 ≒ 4.75x）
-- ✅ **PyTorch の backend が動けば同じコードで動く**（CUDA/ROCm/DirectML/CPU を統一、Linuxだけでなく **Windows** でも）
-- ✅ **実測・再現手順あり**（[`benchmarks/env.json`](benchmarks/env.json) / [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl) とベンチスクリプトを同梱）
+- ✅ **PyTorch の backend が動けば同じコードで動く**（CPU/CUDA/ROCm/DirectML。*One codebase across backends*）
+- ✅ **実測・再現手順あり**（env/jsonl + scripts 同梱。*Reproducible benchmarks included*）
 
 > English README: `README.md`
 
