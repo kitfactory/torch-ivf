@@ -3,16 +3,16 @@
 **Faiss ライクに使える、PyTorch ネイティブ IVF。**  
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
 
-- ✅ **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
-- ✅ **throughput 領域で faiss-cpu を最大 4.75x**（`nq=19600` で 47,302 / 9,962 ≒ 4.75x）
-- ✅ **PyTorch の backend が動けば同じコードで動く**（CPU/CUDA/ROCm/DirectML。*One codebase across backends*）
-- ✅ **実測・再現手順あり**（env/jsonl + scripts 同梱。*Reproducible benchmarks included*）
+- 🔁 **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
+- 📈 **throughput 領域で faiss-cpu を最大 4.75x**（`nq=19600` で 47,302 / 9,962 ≒ 4.75x）
+- 🧩 **PyTorch の backend が動けば同じコードで動く**（CPU/CUDA/ROCm/DirectML。*One codebase across backends*）
+- 🧪 **実測・再現手順あり**（env/jsonl + scripts 同梱。*Reproducible benchmarks included*）
 
 > English README: `README.md`
 
 ---
 
-## 1分でわかる：Faiss ユーザー向け
+## 📌 1分でわかる：Faiss ユーザー向け
 
 Faiss の API との対比は下記です。チュートリアルもご参照ください（[`docs/tutorial.ja.md`](docs/tutorial.ja.md)）。
 
@@ -41,7 +41,7 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 
 ---
 
-## 実測（代表値）
+## 📊 実測（代表値）
 
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > 実行環境: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
@@ -64,7 +64,7 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 
 ---
 
-## インストール（PyTorch は前提）
+## 📦 インストール（PyTorch は前提）
 
 torch-ivf は PyTorch を **強制インストールしません**。  
 CUDA/ROCm/DirectML/CPU など、利用環境に合った PyTorch を **先に**入れてから torch-ivf を入れてください。
@@ -80,7 +80,7 @@ CUDA/ROCm/DirectML/CPU など、利用環境に合った PyTorch を **先に**�
 
 ---
 
-## クイックスタート
+## 🚀 クイックスタート
 
 ### 最小コード（自分のコードに埋め込む）
 

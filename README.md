@@ -3,16 +3,16 @@
 **A PyTorch-native IVF with a Faiss-like API.**  
 The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with a strong focus on Windows + ROCm).
 
-- ✅ **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
-- ✅ **Up to 4.75x vs faiss-cpu in the throughput regime** (`nq=19600`: 47,302 / 9,962 ≒ 4.75x)
-- ✅ **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
-- ✅ **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
+- 🔁 **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
+- 📈 **Up to 4.75x vs faiss-cpu in the throughput regime** (`nq=19600`: 47,302 / 9,962 ≒ 4.75x)
+- 🧩 **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
+- 🧪 **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
 
 > Japanese README: `README.ja.md`
 
 ---
 
-## For Faiss Users (1 minute)
+## 📌 For Faiss Users (1 minute)
 
 Here’s a quick mapping to the Faiss APIs. See the tutorial as well ([`docs/tutorial.en.md`](docs/tutorial.en.md)).
 
@@ -41,7 +41,7 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 
 ---
 
-## Benchmarks (representative values)
+## 📊 Benchmarks (representative values)
 
 > Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > Environment: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
@@ -64,7 +64,7 @@ Red: torch-ivf (ROCm GPU, csr) / Black: faiss-cpu (CPU)
 
 ---
 
-## Installation (PyTorch prerequisite)
+## 📦 Installation (PyTorch prerequisite)
 
 torch-ivf **does not force-install PyTorch**.  
 Install PyTorch first (CUDA/ROCm/DirectML/CPU), then install torch-ivf.
@@ -80,7 +80,7 @@ Install PyTorch first (CUDA/ROCm/DirectML/CPU), then install torch-ivf.
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Minimal code (embed into your own code)
 
