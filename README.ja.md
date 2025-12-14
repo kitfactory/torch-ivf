@@ -4,6 +4,18 @@ torch-ivf は、Faiss の `IndexFlat` / `IndexIVFFlat` に近い API を目指�
 
 - English README: `README.md`
 
+## どこで速い？（1枚まとめ）
+
+- 小バッチ（例: `nq <= 32`）: カーネル起動オーバーヘッドが支配的になりやすく、CPU や `search_mode=matrix` が勝つことがあります。
+- スループット領域（例: `nq >= 512`）: `search_mode=csr` が効きやすく、faiss-cpu を複数倍上回るケースがあります。
+- 推奨: GPU では `search_mode="auto"` を既定にし、可能ならクエリをまとめて投げてください。
+
+## なぜ速い？（3行）
+
+- list ごとに連続配置して、ランダム `gather/index_select` を `slice` に置き換える。
+- 巨大 `topk` をやめ、list ごとの `local topk + merge`（online / buffered）に分解する。
+- 距離計算を GEMM 形（`Q @ X.T`）に寄せ、GPU ベンダーBLASを活かす。
+
 ## クイックスタート
 
 ## インストール（PyTorch は前提）
@@ -61,3 +73,14 @@ uv sync
 uv run pytest
 ```
 
+## 最小の再現手順（おすすめ）
+
+README のベンチ表を再現する最短手順です。
+
+```bash
+uv run python scripts/dump_env.py
+uv run python scripts/benchmark_sweep_nq.py --torch-device cuda --torch-search-mode auto
+uv run python scripts/benchmark_sweep_max_codes.py --torch-device cuda --torch-search-mode csr
+```
+
+結果は `benchmarks/benchmarks.jsonl` に追記されます。最新レコードに合わせて `README.md` の代表値表を更新してください。

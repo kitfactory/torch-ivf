@@ -2,6 +2,18 @@
 
 torch-ivf is a PyTorch-native IVF (Inverted File Index) library that mimics the Faiss `IndexFlat` / `IndexIVFFlat` APIs while running on CPU, CUDA, ROCm, or DirectML from the same codebase. The project is developed primarily on Windows + ROCm PyTorch, so that GPU search workloads can run without switching libraries per vendor.
 
+## When It’s Fast (one-screen summary)
+
+- Tiny batches (e.g., `nq <= 32`): kernel launch overhead dominates; CPU or `search_mode=matrix` may win.
+- Throughput regime (e.g., `nq >= 512`): `search_mode=csr` typically dominates and can exceed faiss-cpu by multiples.
+- Recommended default: set `search_mode="auto"` (GPU), and send larger query batches when possible.
+
+## Why It’s Fast (in 3 lines)
+
+- Replace random `gather/index_select` with contiguous `slice` by packing vectors per list.
+- Replace one huge `topk` with `local topk + merge` (online/ buffered) per list.
+- Form distances via GEMM-style ops (`Q @ X.T`) to leverage vendor BLAS on GPU.
+
 ## Quick Start
 
 ## Installation (PyTorch prerequisite)
@@ -85,6 +97,18 @@ uv run python scripts/benchmark.py --device cuda --nb 32768 --nq 128 --search-mo
 uv run python scripts/benchmark_faiss_cpu.py --nb 32768 --nq 128
 uv run python scripts/dump_env.py
 ```
+
+### Minimal Repro (recommended)
+
+This is the shortest path to reproduce the benchmark tables:
+
+```bash
+uv run python scripts/dump_env.py
+uv run python scripts/benchmark_sweep_nq.py --torch-device cuda --torch-search-mode auto
+uv run python scripts/benchmark_sweep_max_codes.py --torch-device cuda --torch-search-mode csr
+```
+
+Results are appended to `benchmarks/benchmarks.jsonl`. Update representative tables in `README.md` from the latest records.
 
 `--max-codes` (Faiss-compatible) caps the number of scanned candidates per query to stabilize runtime when inverted lists are imbalanced (default: unlimited). In code, this corresponds to `index.max_codes`.
 `--train-n` sets the k-means training sample count; for realistic IVF list balance, use `--train-n (40*nlist)` or more.
