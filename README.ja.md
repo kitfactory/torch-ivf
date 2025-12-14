@@ -92,7 +92,8 @@ d = 128
 xb = torch.randn(262144, d, device="cuda", dtype=torch.float32)
 xq = torch.randn(2048, d, device="cuda", dtype=torch.float32)
 
-index = IndexIVFFlat(d=d, nlist=512, metric="l2", search_mode="auto", nprobe=32).to("cuda")
+index = IndexIVFFlat(d=d, nlist=512, nprobe=32, metric="l2").to("cuda")
+index.search_mode = "auto"
 index.train(xb[:20480])
 index.add(xb)
 

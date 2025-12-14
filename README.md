@@ -1,108 +1,144 @@
 # torch-ivf
 
-torch-ivf is a PyTorch-native IVF (Inverted File Index) library that mimics the Faiss `IndexFlat` / `IndexIVFFlat` APIs while running on CPU, CUDA, ROCm, or DirectML from the same codebase. The project is developed primarily on Windows + ROCm PyTorch, so that GPU search workloads can run without switching libraries per vendor.
+**A PyTorch-native IVF with a Faiss-like API.**  
+The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with a strong focus on Windows + ROCm).
+
+- ✅ **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
+- ✅ **Up to 4.75x vs faiss-cpu in the throughput regime** (`nq=19600`: 47,302 / 9,962 ≒ 4.75x)
+- ✅ **Same code if your PyTorch backend runs** (unified CUDA/ROCm/DirectML/CPU, including **Windows**)
+- ✅ **Measured results + repro steps included** (bundled [`benchmarks/env.json`](benchmarks/env.json) / [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl) and benchmark scripts)
 
 > Japanese README: `README.ja.md`
 
-## When It’s Fast (one-screen summary)
+---
 
-- Tiny batches (e.g., `nq <= 32`): kernel launch overhead dominates; CPU or `search_mode=matrix` may win.
-- Throughput regime (e.g., `nq >= 512`): `search_mode=csr` typically dominates and can exceed faiss-cpu by multiples.
-- Recommended default: set `search_mode="auto"` (GPU), and send larger query batches when possible.
+## For Faiss Users (1 minute)
 
-## Why It’s Fast (in 3 lines)
+Here’s a quick mapping to the Faiss APIs. See the tutorial as well ([`docs/tutorial.en.md`](docs/tutorial.en.md)).
 
-- Replace random `gather/index_select` with contiguous `slice` by packing vectors per list.
-- Replace one huge `topk` with `local topk + merge` (online/ buffered) per list.
-- Form distances via GEMM-style ops (`Q @ X.T`) to leverage vendor BLAS on GPU.
+```python
+from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
+```
 
-## Quick Start
+| What you want | Faiss | torch-ivf |
+|---|---|---|
+| Flat (L2/IP) | `faiss.IndexFlatL2 / faiss.IndexFlatIP` | `torch_ivf.index.IndexFlatL2 / torch_ivf.index.IndexFlatIP` |
+| IVF (L2/IP) | `faiss.IndexIVFFlat` | `torch_ivf.index.IndexIVFFlat` |
+| Tuning | `nprobe`, etc. | `nprobe` + `search_mode` + `max_codes` |
+
+**Recommended for GPU**: `search_mode="auto"` (a lighter path for tiny batches, and `csr` for throughput)
+
+---
+
+## Where Is It Fast? (one-screen summary)
+
+- **Strong in throughput** (e.g. `nq >= 512`)  
+  `search_mode=csr` tends to work well and can beat **faiss-cpu by multiples**.
+- **Weak in tiny batches** (e.g. `nq <= 32`)  
+  Kernel-launch overhead can dominate; CPU or `search_mode=matrix` may win.
+- **Recommended default**  
+  On GPU, keep `search_mode="auto"` and **send larger query batches if possible** (auto chooses a lighter path for tiny batches, and `csr` for throughput).
+
+---
+
+## Benchmarks (representative values)
+
+> Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
+> Environment: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
+> Updated: `2025-12-14T10:40:28` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
+>
+> Note: this table is **fixed to `search_mode=csr`** to highlight the throughput regime. For normal usage, `search_mode=auto` is recommended.
+> faiss-cpu uses the default thread settings (environment-dependent). For reproducibility, fix `OMP_NUM_THREADS` (e.g. Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`).
+
+| nq | torch-ivf (ROCm GPU, csr) | faiss-cpu (CPU) |
+|---:|---:|---:|
+| 512 | **17,656 QPS** | 7,140 QPS |
+| 2,048 | **29,553 QPS** | 8,264 QPS |
+| 19,600 | **47,302 QPS** | 9,962 QPS |
+
+### Chart: QPS vs nq (tiny-batch → throughput)
+
+Red: torch-ivf (ROCm GPU, csr) / Black: faiss-cpu (CPU)
+
+![QPS vs nq](docs/assets/qps_vs_nq.svg)
+
+---
 
 ## Installation (PyTorch prerequisite)
 
-torch-ivf does not force-install PyTorch because you may need a specific wheel variant (CUDA/ROCm/DirectML/CPU).
+torch-ivf **does not force-install PyTorch**.  
+Install PyTorch first (CUDA/ROCm/DirectML/CPU), then install torch-ivf.
 
-- If you already have PyTorch installed (recommended for CUDA/ROCm/DirectML), install torch-ivf:
+- If you already have PyTorch (recommended):
   ```bash
   pip install torch-ivf
   ```
-- If you want a quick CPU-only setup, you can let pip install a compatible PyTorch:
+- If you want a quick CPU setup (also installs PyTorch via pip):
   ```bash
   pip install "torch-ivf[pytorch]"
   ```
 
-1. Run the demo with synthetic vectors.
-   ```bash
-   python examples/ivf_demo.py --device cpu --verify
-   python examples/ivf_demo.py --device cuda --verify
-   ```
-   Use `--device cpu` / `--device cuda` / `--device dml` as needed. `--verify` compares against `IndexFlat`.
-2. Read the user tutorial:
-   - English: `docs/tutorial.en.md`
-   - Japanese: `docs/tutorial.ja.md`
+---
 
-## Development (uv)
+## Quick Start
 
-This repository uses `uv` for development.
-
-```bash
-uv sync
-uv run pytest
-```
-
-## Best Practices (reduce transfer overhead)
-
-- Generate tensors directly on the target device (`torch.randn(..., device=device)`).
-- Feed large mini-batches to `add` / `search` (thousands of vectors per call) to reduce PCIe transfers.
-- Move the index once (`index = IndexIVFFlat(...).to(device)`) and keep all internal buffers on that device.
-- When loading data via DataLoader, use `pin_memory=True` and `tensor.to(device, non_blocking=True)`.
-- Keep metadata (`list_ids`, etc.) on the device; only bring final results back to the host.
+### Minimal code (embed into your own code)
 
 ```python
-loader = DataLoader(ds, batch_size=4096, pin_memory=True, num_workers=4)
-index = IndexIVFFlat(d, nlist=512).to(device)
-for xb, _ in loader:
-    xb = xb.to(device, non_blocking=True)
-    index.add(xb)
+import torch
+from torch_ivf.index import IndexIVFFlat
+
+d = 128
+xb = torch.randn(262144, d, device="cuda", dtype=torch.float32)
+xq = torch.randn(2048, d, device="cuda", dtype=torch.float32)
+
+index = IndexIVFFlat(d=d, nlist=512, nprobe=32, metric="l2").to("cuda")
+index.search_mode = "auto"
+index.train(xb[:20480])
+index.add(xb)
+
+dist, ids = index.search(xq, k=20)
+print(dist.shape, ids.shape)
+
+# Speed vs self-recall trade-off (only if needed)
+# index.max_codes = 32768
 ```
 
-## Device Support Matrix
-
-| Device / API        | Status  | Notes                                            |
-|---------------------|---------|--------------------------------------------------|
-| CPU (x86/ARM)       | ✅       | All tests run on CPU.                            |
-| CUDA (NVIDIA)       | ✅       | `IndexFlat*` / `IndexIVFFlat` operate on CUDA.   |
-| ROCm (Linux)        | ✅       | Same code path, tested on ROCm builds.           |
-| ROCm (Windows)      | ✅       | Primary dev environment (Windows + ROCm PyTorch).|
-| DirectML (Windows)  | ⚠️ Experimental | Basic smoke tests only.                  |
-
-## Documentation
-
-- `docs/concept.md` – background and goals
-- `docs/spec.md` – API specification and behavior
-- `docs/plan.md` – checklist-style progress tracking
-- `docs/tutorial.en.md` – user tutorial (English)
-- `docs/tutorial.ja.md` – user tutorial (Japanese)
-
-## Benchmarks
-
-- `scripts/benchmark.py`: torch-ivf benchmark (CPU/ROCm). Outputs JSON with hardware metadata.
-- `scripts/benchmark_faiss_cpu.py`: faiss-cpu reference benchmark.
-- `scripts/benchmark_sweep_nq.py`: sweep `nq` to reveal tiny-batch vs throughput regimes.
-- `scripts/dump_env.py`: dump a reproducible environment snapshot to `benchmarks/env.json`.
-- `scripts/profile_ivf_search.py`: print a short `torch.profiler` table for `IndexIVFFlat.search`.
-
-Example:
+1) Demo with synthetic data (quick sanity check):
 ```bash
-uv run python scripts/benchmark.py --device cpu --nb 32768 --nq 128 --json
-uv run python scripts/benchmark.py --device cuda --nb 32768 --nq 128 --search-mode auto --json
-uv run python scripts/benchmark_faiss_cpu.py --nb 32768 --nq 128
-uv run python scripts/dump_env.py
+python examples/ivf_demo.py --device cpu --verify
+python examples/ivf_demo.py --device cuda --verify
 ```
 
-### Minimal Repro (recommended)
+2) Tutorial (for users):
+- [`docs/tutorial.en.md`](docs/tutorial.en.md)
+- [`docs/tutorial.ja.md`](docs/tutorial.ja.md)
 
-This is the shortest path to reproduce the benchmark tables:
+---
+
+## Key Points (reduce transfer overhead)
+
+- Create tensors on the target device (`torch.randn(..., device=device)`)
+- Call `add` / `search` with **large batches** when possible (thousands+)
+- Move the index only once (`index = IndexIVFFlat(...).to(device)`) and keep internal buffers on the same device
+- If using DataLoader, use `pin_memory=True` and `tensor.to(device, non_blocking=True)`
+
+---
+
+## Benchmarks (scripts)
+
+- [`scripts/benchmark.py`](scripts/benchmark.py): torch-ivf benchmark (CPU/ROCm). Appends JSON to [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl)
+- [`scripts/benchmark_faiss_cpu.py`](scripts/benchmark_faiss_cpu.py): faiss-cpu reference benchmark
+- [`scripts/benchmark_sweep_nq.py`](scripts/benchmark_sweep_nq.py): sweep `nq` (tiny-batch vs throughput boundary)
+- [`scripts/benchmark_sweep_max_codes.py`](scripts/benchmark_sweep_max_codes.py): sweep `max_codes` (speed / self-recall)
+- [`scripts/dump_env.py`](scripts/dump_env.py): generate [`benchmarks/env.json`](benchmarks/env.json)
+- [`scripts/profile_ivf_search.py`](scripts/profile_ivf_search.py): show `torch.profiler` table for `IndexIVFFlat.search`
+
+---
+
+## Minimal Repro Steps (recommended)
+
+Shortest steps to reproduce the chart/table in this README:
 
 ```bash
 uv run python scripts/dump_env.py
@@ -110,110 +146,93 @@ uv run python scripts/benchmark_sweep_nq.py --torch-device cuda --torch-search-m
 uv run python scripts/benchmark_sweep_max_codes.py --torch-device cuda --torch-search-mode csr
 ```
 
-Results are appended to `benchmarks/benchmarks.jsonl`. Update representative tables in `README.md` from the latest records.
+Results are appended to [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl). Update the representative values in this README to match the latest records.
 
-`--max-codes` (Faiss-compatible) caps the number of scanned candidates per query to stabilize runtime when inverted lists are imbalanced (default: unlimited). In code, this corresponds to `index.max_codes`.
-`--train-n` sets the k-means training sample count; for realistic IVF list balance, use `--train-n (40*nlist)` or more.
+---
 
-`--search-mode` chooses the search path:
-- `matrix`: fixed-shape candidate matrix + one large `topk`.
-- `csr`: CSR/slice + online topk.
-- `auto` (GPU only): selects `csr` when `avg_group = nq*nprobe/nlist` is large enough; otherwise `matrix`.
+## Why Is It Fast? (defeat bottlenecks “by structure”)
 
-Sample JSON (CPU):
-```json
-{
-  "library": "torch_ivf",
-  "device": "cpu",
-  "backend": "CPU",
-  "metric": "l2",
-  "nb": 32768,
-  "nq": 128,
-  "train_ms": 842.317,
-  "search_ms": 154.883,
-  "qps": 826.452
-}
-```
+torch-ivf is not just “faster distance compute”. In IVF workloads, **(A) random candidate access** and **(B) huge selection (`topk`)** often dominate; torch-ivf focuses on fixing these with layout + search-pipeline design.
 
-### Representative Results (`nb=262144`, `train_n=20480`, `nq=512`, `nlist=512`, `nprobe=32`, `k=20`, `dtype=float32`, `--warmup 1 --repeat 5`)
+### 1) First, confirm “what is slow” with profiling
 
-| Library   | Device   | Backend        | search_mode | train_ms | add_ms  | search_ms | QPS      | Notes                             |
-|-----------|----------|----------------|-------------|----------|---------|-----------|----------|-----------------------------------|
-| torch-ivf | ROCm GPU | ROCm 7.1.52802 | matrix      | 871.547  | 913.179 | 157.057   | 3259.967 | `--device cuda` (ROCm GPU)        |
-| torch-ivf | ROCm GPU | ROCm 7.1.52802 | csr         | 901.215  | 938.612 | 28.811    | 17770.929| CSR/slice + online topk (vNext)   |
-| faiss-cpu | CPU      | faiss-cpu      | faiss       | 92.301   | 138.889 | 72.081    | 7103.071 | Reference (C++ implementation)    |
+To avoid blind optimizations, we use `torch.profiler` to find hotspots.
 
-Raw records are stored in `benchmarks/benchmarks.jsonl`.
-Environment snapshots are stored in `benchmarks/env.json`.
+- Tool: [`scripts/profile_ivf_search.py`](scripts/profile_ivf_search.py)
+- What we found:
+  - `matrix` path: `aten::index_select` / `aten::gather` / a large `aten::topk` often dominate.
+  - `csr` path: the share of “random access (gather-like)” drops, and `slice` + GEMM becomes the main work.
 
-### Representative Results (`nb=262144`, `train_n=20480`, `nq=2048`, `nlist=512`, `nprobe=32`, `k=20`, `dtype=float32`, `--warmup 1 --repeat 5`)
+### 2) Replace gather → slice (pack lists contiguously to eliminate random access)
 
-| Library   | Device   | Backend        | search_mode | train_ms | add_ms  | search_ms | QPS       | Notes                             |
-|-----------|----------|----------------|-------------|----------|---------|-----------|-----------|-----------------------------------|
-| torch-ivf | ROCm GPU | ROCm 7.1.52802 | matrix      | 870.266  | 926.951 | 631.782   | 3241.625  | `--device cuda` (ROCm GPU)        |
-| torch-ivf | ROCm GPU | ROCm 7.1.52802 | csr         | 872.731  | 939.334 | 57.546    | 35588.673 | CSR/slice + online topk (vNext)   |
-| faiss-cpu | CPU      | faiss-cpu      | faiss       | 101.726  | 140.194 | 218.445   | 9375.375  | Reference (C++ implementation)    |
+What hurts GPUs is “jumping around” when reading candidate vectors (lots of `gather/index_select`).
 
-### Representative Results (`nb=262144`, `train_n=20480`, `nq=19600`, `nlist=512`, `nprobe=32`, `k=20`, `dtype=float32`, `--warmup 1 --repeat 5`)
+torch-ivf packs vectors **contiguously per inverted list** at `add` time, so search can read candidates via `slice`.
 
-| Library   | Device   | Backend        | search_mode | train_ms | add_ms  | search_ms | QPS       | Notes                             |
-|-----------|----------|----------------|-------------|----------|---------|-----------|-----------|-----------------------------------|
-| torch-ivf | ROCm GPU | ROCm 7.1.52802 | matrix      | 873.139  | 929.645 | 6259.560  | 3131.211  | `--device cuda` (ROCm GPU)        |
-| torch-ivf | ROCm GPU | ROCm 7.1.52802 | csr         | 908.318  | 932.894 | 362.408   | 54082.736 | CSR/slice + online topk (vNext)   |
-| faiss-cpu | CPU      | faiss-cpu      | faiss       | 95.662   | 118.323 | 2109.043  | 9293.315  | Reference (C++ implementation)    |
+- Conceptual layout:
+  - `packed_embeddings`: vectors reordered per list (contiguous)
+  - `list_offsets[l]:list_offsets[l+1]`: `[start:end)` range for list `l`
+  - `list_ids`: mapping from packed row → original id
 
-### nq Sweep (`nb=262144`, `train_n=20480`, `nlist=512`, `nprobe=32`, `k=20`, `dtype=float32`, `--warmup 1 --repeat 5`)
+This changes candidate access from:
 
-`nq` によって “kernel launch 支配” の影響が変わるため、`scripts/benchmark_sweep_nq.py` で曲線を確認できます（`search_ms` は median）。
+- Before: `index_select/gather` (random)
+- Now: `packed_embeddings[start:end]` (contiguous `slice`)
 
-| nq    | torch-ivf ROCm QPS (matrix) | torch-ivf ROCm QPS (csr) | faiss-cpu QPS |
-|------:|-----------------------------:|--------------------------:|--------------:|
-| 1     | 721.501                      | 232.148                   | 2517.623      |
-| 8     | 2054.812                     | 547.420                   | 3556.504      |
-| 32    | 2882.208                     | 1253.467                  | 4041.374      |
-| 128   | 3122.172                     | 4632.495                  | 5634.373      |
-| 512   | 3268.823                     | 17562.334                 | 5832.750      |
-| 2048  | 3153.656                     | 31242.468                 | 7809.676      |
-| 19600 | 3114.037                     | 48977.764                 | 9110.788      |
+and improves the memory-access pattern.
+
+### 3) Replace one huge topk → local topk + merge (keep selection small, optimize repetition)
+
+The `matrix` path tends to “pack candidates into a fixed-shape matrix, then do one huge `topk`”. If candidate counts inflate, `topk` and intermediate tensor traffic dominate.
+
+The `csr` path processes per list:
+
+1. Get list candidates `X` by `slice`
+2. Compute distances/scores via `Q @ X.T`
+3. Run `local_topk(k)` inside the list
+4. `merge` into the global top-k (online / buffered)
+
+Keeping `topk` small makes throughput scale better.
+
+### 4) Prefer GEMM form (leverage vendor BLAS)
+
+Whenever possible, we express distance computation as GEMM:
+
+- IP: `scores = Q @ X.T`
+- L2: `||q-x||^2 = ||q||^2 + ||x||^2 - 2 (Q @ X.T)`
+
+This makes it easier to leverage ROCm/CUDA BLAS (rocBLAS/cuBLAS), improving GPU throughput.
+
+### 5) Processing image (search flow)
 
 ```mermaid
-xychart-beta
-  title "QPS vs nq (ROCm GPU / nb=262144, nlist=512, nprobe=32, k=20)"
-  x-axis [1, 8, 32, 128, 512, 2048, 19600]
-  y-axis "QPS" 0 --> 70000
-  line "torch-ivf matrix" [722, 2055, 2882, 3122, 3269, 3154, 3114]
-  line "torch-ivf csr" [232, 547, 1253, 4632, 17562, 31242, 48978]
-  line "faiss-cpu" [2518, 3557, 4041, 5634, 5833, 7810, 9111]
+flowchart TD
+  Q["Query Q: nq x d"] --> Coarse["Coarse: centroid topk (nprobe)"]
+  Coarse --> Lists["Probed list ids: nq x nprobe"]
+  Lists --> Tasks["Tasks: query_id, list_id"]
+  Tasks --> Group["Group by list_id"]
+  Group --> Slice["Slice packed_embeddings by list_offsets"]
+  Slice --> GEMM["Scores/Dist via GEMM: Q @ X.T"]
+  GEMM --> LocalTopk["local topk k per list"]
+  LocalTopk --> Merge["merge to global top-k"]
+  Merge --> Out["Distances/Ids: nq x k"]
 ```
 
-### max_codes Sweep (`nq=19600`, `k=20`, `--warmup 1 --repeat 5`)
+---
 
-`recall@k` は **同一ライブラリの `max_codes=0`（無制限）** を基準にした自己比較です（torch-ivf と faiss-cpu は学習手順が異なるため、相互比較の recall ではありません）。
+## Development (uv)
 
-Last updated: `2025-12-14T09:34:35` (torch-ivf `search_mode=matrix`)
+```bash
+uv sync
+uv run pytest
+```
 
-| max_codes | torch-ivf ROCm search_ms | torch-ivf ROCm QPS | torch-ivf recall@k | faiss-cpu search_ms | faiss-cpu QPS | faiss-cpu recall@k |
-|----------:|--------------------------:|-------------------:|-------------------:|--------------------:|--------------:|-------------------:|
-| 0         | 6409.594                  | 3057.916           | 1.000000           | 2444.721            | 8017.276      | 1.000000           |
-| 16384     | 3122.855                  | 6276.307           | 0.645903           | 1268.824            | 15447.379     | 0.643005           |
-| 32768     | 6263.967                  | 3129.007           | 0.997574           | 2355.993            | 8319.209      | 0.996574           |
-| 65536     | 6319.457                  | 3101.532           | 1.000000           | 2413.968            | 8119.412      | 1.000000           |
-| 131072    | 6323.537                  | 3099.531           | 1.000000           | 2412.337            | 8124.901      | 1.000000           |
+---
 
-### max_codes Sweep (`search_mode=csr`, `nq=19600`, `k=20`, `--warmup 1 --repeat 5`)
+## Documentation
 
-`recall@k` は **同一ライブラリの `max_codes=0`（無制限）** を基準にした自己比較です（torch-ivf と faiss-cpu は学習手順が異なるため、相互比較の recall ではありません）。
-
-Last updated: `2025-12-14T09:39:28` (torch-ivf `search_mode=csr`)
-
-| max_codes | torch-ivf ROCm search_ms | torch-ivf ROCm QPS | torch-ivf recall@k | faiss-cpu search_ms | faiss-cpu QPS | faiss-cpu recall@k |
-|----------:|--------------------------:|-------------------:|-------------------:|--------------------:|--------------:|-------------------:|
-| 0         | 391.938                   | 50007.948          | 1.000000           | 2266.761            | 8646.701      | 1.000000           |
-| 16384     | 305.910                   | 64071.069          | 0.631319           | 1277.172            | 15346.410     | 0.643005           |
-| 32768     | 411.409                   | 47641.132          | 0.995556           | 2279.069            | 8600.003      | 0.996574           |
-| 65536     | 411.916                   | 47582.482          | 1.000000           | 2262.697            | 8662.229      | 1.000000           |
-| 131072    | 411.763                   | 47600.163          | 1.000000           | 2295.565            | 8538.202      | 1.000000           |
-
-## License
-
-MIT License (planned).
+- [`docs/concept.md`](docs/concept.md) – background and goals
+- [`docs/spec.md`](docs/spec.md) – specification (API/behavior)
+- [`docs/plan.md`](docs/plan.md) – progress checklist
+- [`docs/tutorial.ja.md`](docs/tutorial.ja.md) – tutorial (Japanese)
+- [`docs/tutorial.en.md`](docs/tutorial.en.md) – tutorial (English)
