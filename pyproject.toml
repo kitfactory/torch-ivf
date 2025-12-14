@@ -1,0 +1,25 @@
+[project]
+name = "torch-ivf"
+version = "0.1.0"
+description = "PyTorch-native IVF index for CUDA/ROCm/DirectML/CPU."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+authors = [{ name = "torch-ivf contributors" }]
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[dependency-groups]
+dev = [
+    "faiss-cpu>=1.13.1",
+    "pytest>=9.0.2",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
