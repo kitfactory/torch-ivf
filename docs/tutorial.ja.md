@@ -30,6 +30,10 @@ python examples/ivf_demo.py --device cuda --verify
 
 小規模・正解生成・IVF の検証などには Flat（全探索）が便利です。
 
+メトリクス選択の目安:
+- L2: そのままの特徴量で距離（一般的）
+- IP: 正規化済み特徴量で cosine 類似（≒内積）として使うことが多い
+
 ```python
 import torch
 from torch_ivf.index import IndexFlatL2
@@ -52,10 +56,14 @@ import torch
 from torch_ivf.index import IndexIVFFlat
 
 d = 128
-xb = torch.randn(200000, d, device="cuda")
-xq = torch.randn(4096, d, device="cuda")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+# ROCm/DirectML を使う場合も、PyTorch が認識できる device 文字列を指定します。
 
-index = IndexIVFFlat(d, nlist=512, nprobe=32, device="cuda")
+xb = torch.randn(200000, d, device=device)
+xq = torch.randn(4096, d, device=device)
+
+index = IndexIVFFlat(d=d, nlist=512, nprobe=32, metric="l2").to(device)
+index.search_mode = "auto"
 index.train(xb[:20480])
 index.add(xb)
 D, I = index.search(xq, k=20)
@@ -68,6 +76,8 @@ D, I = index.search(xq, k=20)
 - `matrix`: 固定形状の候補行列を作り、1回の大きい `topk` を実行
 - `csr`: list 連続化 + slice を前提に、list 単位で距離計算し online topk（小さな `topk` の繰り返し）
 - `auto`: GPU のときに `nq*nprobe/nlist` が十分大きければ `csr` を選ぶ（小バッチは `matrix` に寄せる）
+
+迷ったら `auto` を使うのが安全です（小バッチ/まとめ投げのどちらでも寄せてくれます）。
 
 ## 5. `max_codes`（Faiss 互換の近似ノブ）
 
@@ -85,3 +95,4 @@ D, I = index.search(xq, k=20)
 - **転送が計測に混ざる**: `xb`/`xq` を毎回 CPU→GPU に `.to()` していると遅くなります。テンソルは最初から目的 device で作るか、1回だけ移して使い回してください。
 - **小バッチは CPU/別パスが強いことがある**: `nq` が小さいと GPU の起動コストが支配的になります。`search_mode="auto"` を使うか、クエリをまとめて投げてください。
 - **`train_n` が少ない**: `train_n` が小さいと list が偏り、候補数が増えて遅くなりやすいです。目安として `train_n >= 40*nlist` を推奨します。
+- **性能比較はスクリプトで行う**: 手計測だと同期/ウォームアップ/統計が揃わずブレます。`scripts/benchmark*.py` を使ってください。
