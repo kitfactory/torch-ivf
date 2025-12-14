@@ -156,15 +156,15 @@ torch-ivf は、ただ距離計算を速くするだけではなく、IVF で支
 当てずっぽうの高速化を避けるため、`torch.profiler` でホットスポットを確認します。
 
 - 使うもの: [`scripts/profile_ivf_search.py`](scripts/profile_ivf_search.py)
-- 見るポイント（典型例）:
-  - `matrix` 側: `aten::index_select` / `aten::gather` / 大きい `aten::topk` が支配しやすい
-  - `csr` 側: “ランダム参照（gather 系）” の比率が下がり、`slice` + GEMM が主体になりやすい
+- 発見したこと:
+  - `matrix` 側: `aten::index_select` / `aten::gather` / 大きい `aten::topk` が支配しやすいことがわかりました。
+  - `csr` 側: “ランダム参照（gather 系）” の比率が下がり、`slice` + GEMM が主体になりやすいことがわかりました。
 
 ### 2) gather → slice（list を連続配置してランダムアクセスを消す）
 
 GPU にとって厳しいのは、候補ベクトルへのアクセスが「飛び飛び」になることです（`gather/index_select` が多い）。
 
-torch-ivf は `add` の段階で、inverted list ごとに **ベクトルを連続配置**し、検索時は `slice` で候補を取れる形にします。
+torch-ivf は `add` の段階で、inverted list ごとに **ベクトルを連続配置**し、検索時は `slice` で候補を取れる形にしました。
 
 - 概念的なレイアウト:
   - `packed_embeddings`: list 単位に並び替えたベクトル（連続）
@@ -176,20 +176,20 @@ torch-ivf は `add` の段階で、inverted list ごとに **ベクトルを連�
 - 以前: `index_select/gather`（ランダム）
 - いま: `packed_embeddings[start:end]`（連続 `slice`）
 
-となり、メモリアクセスの性質が改善します。
+となり、メモリアクセスの性質が改善しました。
 
 ### 3) 巨大 topk → local topk + merge（選別を小さくして回数を最適化）
 
 `matrix` パスは「候補を固定形状の行列に詰めて、1 回の大きい `topk`」になりやすく、候補数が膨らむと `topk` と中間テンソルのメモリ移動が支配的になります。
 
-`csr` パスは list 単位に分割して処理します:
+`csr` パスは list 単位に分割して処理しました:
 
 1. list の候補 `X` を `slice` で取得
 2. `Q @ X.T` で距離（スコア）を作る
 3. list 内で `local_topk(k)`
 4. `merge` で全体 top-k を更新（online / buffered）
 
-この形にすると、常に「小さい topk」を回せるため、throughput 領域で伸びやすくなります。
+この形にすると、常に「小さい topk」を回せるため、throughput 領域で伸びやすくなりました。
 
 ### 4) GEMM 形に寄せる（ベンダー BLAS を最大限使う）
 
@@ -198,7 +198,7 @@ torch-ivf は `add` の段階で、inverted list ごとに **ベクトルを連�
 - IP: `scores = Q @ X.T`
 - L2: `||q-x||^2 = ||q||^2 + ||x||^2 - 2 (Q @ X.T)`
 
-ROCm/CUDA の BLAS（rocBLAS/cuBLAS）を活かしやすい形なので、GPU での throughput が出やすくなります。
+ROCm/CUDA の BLAS（rocBLAS/cuBLAS）を活かしやすい形なので、GPU での throughput が出やすくなりました。
 
 ### 5) 処理イメージ（検索の流れ）
 
