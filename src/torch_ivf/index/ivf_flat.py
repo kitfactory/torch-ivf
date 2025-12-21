@@ -9,6 +9,39 @@ from ..nn import kmeans
 from .base import IndexBase, MetricType
 
 
+class _Workspace:
+    def __init__(self) -> None:
+        self._buffers: dict[str, torch.Tensor] = {}
+        self.capacity: dict[str, int] = {}
+
+    def __deepcopy__(self, memo) -> "_Workspace":
+        return _Workspace()
+
+    def ensure(
+        self, name: str, shape: tuple[int, ...], *, dtype: torch.dtype, device: torch.device
+    ) -> torch.Tensor:
+        required = 1
+        for dim in shape:
+            required *= int(dim)
+        if required <= 0:
+            return torch.empty(shape, dtype=dtype, device=device)
+
+        buf = self._buffers.get(name)
+        if buf is None or buf.device != device or buf.dtype != dtype:
+            buf = None
+
+        if buf is None or buf.numel() < required:
+            current = int(buf.numel()) if buf is not None else 0
+            grow = int(current * 1.5) if current > 0 else 0
+            new_size = max(required, grow)
+            buf = torch.empty(new_size, dtype=dtype, device=device)
+            self._buffers[name] = buf
+            self.capacity[name] = int(buf.numel())
+
+        view = buf[:required].view(shape)
+        return view
+
+
 class IndexIVFFlat(IndexBase):
     """PyTorch implementation of IVF-Flat."""
 
@@ -26,11 +59,19 @@ class IndexIVFFlat(IndexBase):
         self._nlist = int(nlist) if nlist is not None else 1024
         if self._nlist <= 0:
             raise ValueError("nlist must be positive.")
+        self._centroids_t: torch.Tensor | None = None
+        self._centroid_norm2: torch.Tensor | None = None
+        self._list_sizes: torch.Tensor | None = None
+        self._list_sizes_cpu: list[int] | None = None
+        self._effective_max_codes_cache: int | None = None
+        self._workspace = _Workspace()
         self._nprobe = 1
         self.nprobe = nprobe or min(8, self._nlist)
         self._max_codes = 0
         self._search_mode = "matrix"
         self._auto_search_avg_group_threshold = 8.0
+        self._csr_small_batch_avg_group_threshold = 64.0
+        self._approximate_mode = False
         self._reset_storage()
 
     # ------------------------------------------------------------------ #
@@ -49,6 +90,7 @@ class IndexIVFFlat(IndexBase):
         if value <= 0:
             raise ValueError("nprobe must be positive.")
         self._nprobe = min(value, self._nlist)
+        self._invalidate_max_codes_cache()
 
     @property
     def max_codes(self) -> int:
@@ -59,6 +101,7 @@ class IndexIVFFlat(IndexBase):
         if value < 0:
             raise ValueError("max_codes must be >= 0.")
         self._max_codes = int(value)
+        self._invalidate_max_codes_cache()
 
     @property
     def search_mode(self) -> str:
@@ -80,6 +123,25 @@ class IndexIVFFlat(IndexBase):
         if not (value_f > 0):
             raise ValueError("auto_search_avg_group_threshold must be > 0.")
         self._auto_search_avg_group_threshold = value_f
+
+    @property
+    def csr_small_batch_avg_group_threshold(self) -> float:
+        return self._csr_small_batch_avg_group_threshold
+
+    @csr_small_batch_avg_group_threshold.setter
+    def csr_small_batch_avg_group_threshold(self, value: float) -> None:
+        value_f = float(value)
+        if not (value_f > 0):
+            raise ValueError("csr_small_batch_avg_group_threshold must be > 0.")
+        self._csr_small_batch_avg_group_threshold = value_f
+
+    @property
+    def approximate_mode(self) -> bool:
+        return self._approximate_mode
+
+    @approximate_mode.setter
+    def approximate_mode(self, value: bool) -> None:
+        self._approximate_mode = bool(value)
 
     # ------------------------------------------------------------------ #
     # Core API
@@ -116,6 +178,7 @@ class IndexIVFFlat(IndexBase):
         self._list_ids = torch.empty(0, dtype=torch.long, device=self.device)
         self._is_trained = True
         self._ntotal = 0
+        self._invalidate_search_cache()
 
     def add(self, xb: torch.Tensor) -> None:
         self._ensure_trained()
@@ -244,6 +307,7 @@ class IndexIVFFlat(IndexBase):
         self._reset_storage()
         self._ntotal = 0
         self._is_trained = False
+        self._invalidate_search_cache()
 
     # ------------------------------------------------------------------ #
     # Serialization
@@ -283,6 +347,7 @@ class IndexIVFFlat(IndexBase):
         self.max_codes = int(state.get("max_codes", self._max_codes))
         self._is_trained = self._centroids.numel() > 0
         self._ntotal = self._packed_embeddings.shape[0]
+        self._invalidate_search_cache()
 
     def save(self, path: str) -> None:
         torch.save(self.state_dict(), path)
@@ -311,6 +376,51 @@ class IndexIVFFlat(IndexBase):
         if k <= 0:
             raise ValueError("k must be positive.")
 
+    def _invalidate_search_cache(self) -> None:
+        self._centroids_t = None
+        self._centroid_norm2 = None
+        self._list_sizes = None
+        self._list_sizes_cpu = None
+        self._effective_max_codes_cache = None
+
+    def _invalidate_max_codes_cache(self) -> None:
+        self._effective_max_codes_cache = None
+
+    def _ensure_search_cache(self) -> None:
+        if self._centroids_t is None or self._centroid_norm2 is None:
+            if self._centroids.numel() == 0:
+                self._centroids_t = None
+                self._centroid_norm2 = None
+            else:
+                centroids_cast = self._centroids.to(self.dtype)
+                self._centroids_t = centroids_cast.transpose(0, 1).contiguous()
+                self._centroid_norm2 = (centroids_cast * centroids_cast).sum(dim=1)
+
+        if self._list_sizes is None:
+            if self._list_offsets.numel() == 0:
+                self._list_sizes = torch.zeros(0, dtype=torch.long, device=self.device)
+            else:
+                self._list_sizes = self._list_offsets[1:] - self._list_offsets[:-1]
+
+        if self._list_sizes_cpu is None:
+            if len(self._list_offsets_cpu) == self._nlist + 1:
+                offsets_cpu = self._list_offsets_cpu
+            else:
+                offsets_cpu = self._list_offsets.to("cpu").tolist()
+            self._list_sizes_cpu = [
+                int(offsets_cpu[i + 1]) - int(offsets_cpu[i]) for i in range(self._nlist)
+            ]
+
+    def _get_list_sizes(self) -> torch.Tensor:
+        sizes = self._list_sizes
+        if sizes is None or sizes.device != self.device:
+            if self._list_offsets.numel() == 0:
+                sizes = torch.zeros(0, dtype=torch.long, device=self.device)
+            else:
+                sizes = self._list_offsets[1:] - self._list_offsets[:-1]
+            self._list_sizes = sizes
+        return sizes
+
     def _reset_storage(self) -> None:
         self._centroids = torch.empty((0, self.d), dtype=self.dtype, device=self.device)
         self._packed_embeddings = torch.empty((0, self.d), dtype=self.dtype, device=self.device)
@@ -318,6 +428,7 @@ class IndexIVFFlat(IndexBase):
         self._list_ids = torch.empty(0, dtype=torch.long, device=self.device)
         self._list_offsets = torch.zeros(self._nlist + 1, dtype=torch.long, device=self.device)
         self._list_offsets_cpu = [0] * (self._nlist + 1)
+        self._invalidate_search_cache()
 
     def _assign_and_append(self, xb: torch.Tensor, ids: torch.Tensor) -> None:
         assign = self._assign_centroids(xb)
@@ -335,6 +446,7 @@ class IndexIVFFlat(IndexBase):
             self._list_offsets = offsets
             self._list_offsets_cpu = offsets.to("cpu").tolist()
             self._ntotal = xb.shape[0]
+            self._invalidate_search_cache()
             return
 
         order = torch.argsort(assign)
@@ -393,6 +505,7 @@ class IndexIVFFlat(IndexBase):
         self._list_offsets = new_offsets
         self._list_offsets_cpu = new_offsets_cpu
         self._ntotal = total
+        self._invalidate_search_cache()
 
     def _assign_centroids(self, xb: torch.Tensor) -> torch.Tensor:
         if self._centroids.shape[0] == 0:
@@ -405,7 +518,7 @@ class IndexIVFFlat(IndexBase):
         out = torch.empty((xb.shape[0],), dtype=torch.long, device=self.device)
         for start in range(0, xb.shape[0], batch):
             end = min(xb.shape[0], start + batch)
-            scores = self._pairwise(xb[start:end], self._centroids)
+            scores = self._pairwise_centroids(xb[start:end])
             if self.metric == "l2":
                 out[start:end] = torch.argmin(scores, dim=1)
             else:
@@ -419,14 +532,14 @@ class IndexIVFFlat(IndexBase):
             return min(total_queries, 8)
         avg_list = max(1, (self._ntotal + max(1, self._nlist) - 1) // max(1, self._nlist))
         denom = max(1, self._nprobe * avg_list)
-        budget = 250_000  # candidate vectors per chunk (GPU/accelerator)
+        budget = self._candidate_budget()
         chunk = max(1, budget // denom)
         return min(total_queries, chunk)
 
     def _top_probed_lists(self, xq: torch.Tensor) -> torch.Tensor:
         if xq.shape[0] == 0 or self._centroids.shape[0] == 0:
             return torch.empty((xq.shape[0], 0), dtype=torch.long, device=self.device)
-        centroid_scores = self._pairwise(xq, self._centroids)
+        centroid_scores = self._pairwise_centroids(xq)
         probe = min(self._nprobe, centroid_scores.shape[1])
         if probe <= 0:
             return torch.empty((xq.shape[0], 0), dtype=torch.long, device=self.device)
@@ -439,28 +552,29 @@ class IndexIVFFlat(IndexBase):
         if max_codes <= 0:
             return 0
 
+        cached = self._effective_max_codes_cache
+        if cached is not None:
+            return cached
+
         probe = min(self._nprobe, self._nlist)
         if probe <= 0:
             return 0
 
-        offsets_cpu = self._list_offsets_cpu
-        if len(offsets_cpu) != self._nlist + 1:
-            offsets_cpu = self._list_offsets.to("cpu").tolist()
-
-        sizes = [int(offsets_cpu[i + 1]) - int(offsets_cpu[i]) for i in range(self._nlist)]
+        self._ensure_search_cache()
+        sizes = self._list_sizes_cpu or []
         if probe >= self._nlist:
-            max_possible = int(offsets_cpu[-1]) - int(offsets_cpu[0])
+            max_possible = sum(sizes)
         else:
             max_possible = sum(heapq.nlargest(probe, sizes))
 
-        if max_codes >= max_possible:
-            return 0
-        return max_codes
+        effective = 0 if max_codes >= max_possible else max_codes
+        self._effective_max_codes_cache = effective
+        return effective
 
     def _estimate_candidates_per_query(self, top_lists: torch.Tensor, *, max_codes: int | None = None) -> torch.Tensor:
         if top_lists.numel() == 0:
             return torch.zeros(top_lists.shape[0], dtype=torch.long, device=self.device)
-        sizes = self._list_offsets[1:] - self._list_offsets[:-1]
+        sizes = self._get_list_sizes()
         per_probe = sizes[top_lists]
         counts = per_probe.sum(dim=1)
         max_codes_i = self._max_codes if max_codes is None else int(max_codes)
@@ -517,8 +631,7 @@ class IndexIVFFlat(IndexBase):
             return empty, empty, empty
 
         b, probe = top_lists.shape
-        offsets = self._list_offsets
-        sizes = offsets[top_lists + 1] - offsets[top_lists]
+        sizes = self._get_list_sizes()[top_lists]
 
         max_codes_i = self._max_codes if max_codes is None else int(max_codes)
         if max_codes_i:
@@ -552,8 +665,7 @@ class IndexIVFFlat(IndexBase):
             return empty, empty, empty, empty
 
         b, probe = top_lists.shape
-        offsets = self._list_offsets
-        sizes = offsets[top_lists + 1] - offsets[top_lists]
+        sizes = self._get_list_sizes()[top_lists]
 
         max_codes_i = self._max_codes if max_codes is None else int(max_codes)
         if max_codes_i:
@@ -623,8 +735,14 @@ class IndexIVFFlat(IndexBase):
         chunk_size = xq_chunk.shape[0]
         largest = self.metric == "ip"
         fill = float("inf") if not largest else float("-inf")
-        best_scores = torch.full((chunk_size, k), fill, dtype=self.dtype, device=self.device)
-        best_packed = torch.full((chunk_size, k), -1, dtype=torch.long, device=self.device)
+        best_scores = self._workspace.ensure(
+            "csr_best_scores", (chunk_size, k), dtype=self.dtype, device=self.device
+        )
+        best_scores.fill_(fill)
+        best_packed = self._workspace.ensure(
+            "csr_best_packed", (chunk_size, k), dtype=torch.long, device=self.device
+        )
+        best_packed.fill_(-1)
         if chunk_size == 0 or top_lists.numel() == 0:
             return best_scores, best_packed
 
@@ -633,7 +751,18 @@ class IndexIVFFlat(IndexBase):
         q2 = (q * q).sum(dim=1) if self.metric == "l2" else None
 
         avg_group_size = (chunk_size * top_lists.shape[1]) / max(1, self._nlist)
-        if avg_group_size < 64:
+        if avg_group_size < self._csr_small_batch_avg_group_threshold:
+            query_counts = self._estimate_candidates_per_query(top_lists, max_codes=max_codes)
+            max_candidates = int(query_counts.max().item()) if query_counts.numel() else 0
+            if max_candidates > 0 and (chunk_size * max_candidates) <= self._candidate_budget():
+                pos_1d = torch.arange(max_candidates, dtype=torch.long, device=self.device)
+                index_matrix, query_counts = self._build_candidate_index_matrix_from_lists(
+                    top_lists,
+                    max_candidates=max_candidates,
+                    pos_1d=pos_1d,
+                    max_codes=max_codes,
+                )
+                return self._search_from_index_matrix(q, index_matrix, query_counts, k)
             return self._search_csr_buffered_chunk(q, q2, top_lists, k, max_codes=max_codes)
 
         tasks_q, _, groups = self._build_tasks_from_lists(top_lists, max_codes=max_codes)
@@ -659,7 +788,7 @@ class IndexIVFFlat(IndexBase):
             else:
                 q2g = None
 
-            vec_chunk = 4096
+            vec_chunk = self._csr_vec_chunk(buffered=False)
             if (b - a) <= vec_chunk:
                 x = self._packed_embeddings[a:b]
                 prod = torch.matmul(qg, x.transpose(0, 1))
@@ -685,8 +814,14 @@ class IndexIVFFlat(IndexBase):
                     )
                 self._merge_topk(best_scores, best_packed, query_ids, cand_scores, cand_packed, k, largest=largest)
             else:
-                local_best_scores = torch.full((qg.shape[0], k), fill, dtype=self.dtype, device=self.device)
-                local_best_packed = torch.full((qg.shape[0], k), -1, dtype=torch.long, device=self.device)
+                local_best_scores = self._workspace.ensure(
+                    "csr_local_best_scores", (qg.shape[0], k), dtype=self.dtype, device=self.device
+                )
+                local_best_scores.fill_(fill)
+                local_best_packed = self._workspace.ensure(
+                    "csr_local_best_packed", (qg.shape[0], k), dtype=torch.long, device=self.device
+                )
+                local_best_packed.fill_(-1)
                 local_query_ids = torch.arange(qg.shape[0], dtype=torch.long, device=self.device)
                 for p in range(a, b, vec_chunk):
                     pe = min(b, p + vec_chunk)
@@ -739,25 +874,39 @@ class IndexIVFFlat(IndexBase):
         largest = self.metric == "ip"
         fill = float("inf") if not largest else float("-inf")
         if chunk_size == 0 or probe == 0:
-            best_scores = torch.full((chunk_size, k), fill, dtype=self.dtype, device=self.device)
-            best_ids = torch.full((chunk_size, k), -1, dtype=torch.long, device=self.device)
+            best_scores = self._workspace.ensure(
+                "csr_buf_best_scores", (chunk_size, k), dtype=self.dtype, device=self.device
+            )
+            best_scores.fill_(fill)
+            best_ids = self._workspace.ensure(
+                "csr_buf_best_ids", (chunk_size, k), dtype=torch.long, device=self.device
+            )
+            best_ids.fill_(-1)
             return best_scores, best_ids
 
         tasks_q, _, tasks_p, groups = self._build_tasks_from_lists_with_probe(top_lists, max_codes=max_codes)
         if groups.numel() == 0:
-            best_scores = torch.full((chunk_size, k), fill, dtype=self.dtype, device=self.device)
-            best_ids = torch.full((chunk_size, k), -1, dtype=torch.long, device=self.device)
+            best_scores = self._workspace.ensure(
+                "csr_buf_best_scores", (chunk_size, k), dtype=self.dtype, device=self.device
+            )
+            best_scores.fill_(fill)
+            best_ids = self._workspace.ensure(
+                "csr_buf_best_ids", (chunk_size, k), dtype=torch.long, device=self.device
+            )
+            best_ids.fill_(-1)
             return best_scores, best_ids
 
         t = tasks_q.numel()
-        task_scores = torch.full((t, k), fill, dtype=self.dtype, device=self.device)
-        task_packed = torch.full((t, k), -1, dtype=torch.long, device=self.device)
+        task_scores = self._workspace.ensure("csr_task_scores", (t, k), dtype=self.dtype, device=self.device)
+        task_scores.fill_(fill)
+        task_packed = self._workspace.ensure("csr_task_packed", (t, k), dtype=torch.long, device=self.device)
+        task_packed.fill_(-1)
 
         q_tasks = q.index_select(0, tasks_q)
         q2_tasks = q2.index_select(0, tasks_q) if q2 is not None else None
 
         groups_cpu = groups.to("cpu").tolist()
-        vec_chunk = 16384
+        vec_chunk = self._csr_vec_chunk(buffered=True)
         for l, start, end in groups_cpu:
             a = int(self._list_offsets_cpu[int(l)])
             b = int(self._list_offsets_cpu[int(l) + 1])
@@ -800,8 +949,14 @@ class IndexIVFFlat(IndexBase):
                 task_scores[s:e] = cand_scores
                 task_packed[s:e] = cand_packed
             else:
-                local_best_scores = torch.full((qg.shape[0], k), fill, dtype=self.dtype, device=self.device)
-                local_best_packed = torch.full((qg.shape[0], k), -1, dtype=torch.long, device=self.device)
+                local_best_scores = self._workspace.ensure(
+                    "csr_buf_local_best_scores", (qg.shape[0], k), dtype=self.dtype, device=self.device
+                )
+                local_best_scores.fill_(fill)
+                local_best_packed = self._workspace.ensure(
+                    "csr_buf_local_best_packed", (qg.shape[0], k), dtype=torch.long, device=self.device
+                )
+                local_best_packed.fill_(-1)
                 local_query_ids = torch.arange(qg.shape[0], dtype=torch.long, device=self.device)
                 for p in range(a, b, vec_chunk):
                     pe = min(b, p + vec_chunk)
@@ -842,8 +997,14 @@ class IndexIVFFlat(IndexBase):
                 task_scores[s:e] = local_best_scores
                 task_packed[s:e] = local_best_packed
 
-        buf_scores = torch.full((chunk_size * probe, k), fill, dtype=self.dtype, device=self.device)
-        buf_packed = torch.full((chunk_size * probe, k), -1, dtype=torch.long, device=self.device)
+        buf_scores = self._workspace.ensure(
+            "csr_buf_scores", (chunk_size * probe, k), dtype=self.dtype, device=self.device
+        )
+        buf_scores.fill_(fill)
+        buf_packed = self._workspace.ensure(
+            "csr_buf_packed", (chunk_size * probe, k), dtype=torch.long, device=self.device
+        )
+        buf_packed.fill_(-1)
         linear = tasks_q * probe + tasks_p
         buf_scores.index_copy_(0, linear, task_scores)
         buf_packed.index_copy_(0, linear, task_packed)
@@ -861,6 +1022,18 @@ class IndexIVFFlat(IndexBase):
             return 20_000
         return 200_000
 
+    def _bytes_per_vector(self) -> int:
+        elem_size = torch.tensor([], dtype=self.dtype).element_size()
+        return max(1, int(self.d) * int(elem_size))
+
+    def _csr_vec_chunk(self, *, buffered: bool) -> int:
+        if self.device.type == "cpu":
+            target_bytes = 8 * 1024 * 1024 if buffered else 4 * 1024 * 1024
+        else:
+            target_bytes = 32 * 1024 * 1024 if buffered else 16 * 1024 * 1024
+        bytes_per_vec = self._bytes_per_vector()
+        return max(1, int(target_bytes // bytes_per_vec))
+
     def _iter_query_chunks_csr(self, nq: int) -> list[tuple[int, int]]:
         if nq <= 0:
             return [(0, 0)]
@@ -871,9 +1044,19 @@ class IndexIVFFlat(IndexBase):
         return [(i, min(nq, i + chunk)) for i in range(0, nq, chunk)]
 
     def _candidate_budget(self) -> int:
+        bytes_per_vec = self._bytes_per_vector()
         if self.device.type == "cpu":
-            return 400_000
-        return 250_000
+            target_bytes = 512 * 1024 * 1024
+        else:
+            target_bytes = 256 * 1024 * 1024
+            if self.device.type == "cuda" and torch.cuda.is_available() and hasattr(torch.cuda, "mem_get_info"):
+                try:
+                    free_mem, _ = torch.cuda.mem_get_info(self.device)
+                    target_bytes = min(target_bytes, int(free_mem * 0.1))
+                except RuntimeError:
+                    pass
+        target_bytes = max(target_bytes, bytes_per_vec)
+        return max(1, int(target_bytes // bytes_per_vec))
 
     def _candidate_block_size(self, max_candidates: int) -> int:
         if self.device.type == "cpu":
@@ -1187,7 +1370,7 @@ class IndexIVFFlat(IndexBase):
             counts = torch.zeros(xq.shape[0], dtype=torch.long, device=self.device)
             return empty_vecs, empty_ids, empty_queries, counts
 
-        centroid_scores = self._pairwise(xq, self._centroids)
+        centroid_scores = self._pairwise_centroids(xq)
         probe = min(self._nprobe, centroid_scores.shape[1])
         if probe == 0:
             empty_vecs = torch.empty((0, self.d), dtype=self.dtype, device=self.device)
@@ -1329,6 +1512,23 @@ class IndexIVFFlat(IndexBase):
             return (diff * diff).sum(dim=1)
         return (query_vecs * cand_vecs).sum(dim=1)
 
+    def _pairwise_centroids(self, x: torch.Tensor) -> torch.Tensor:
+        if self._centroids.shape[0] == 0:
+            return torch.empty(x.shape[0], 0, dtype=self.dtype, device=self.device)
+        self._ensure_search_cache()
+        centroids_t = self._centroids_t
+        if centroids_t is None:
+            return torch.empty(x.shape[0], 0, dtype=self.dtype, device=self.device)
+        x_cast = x.to(self.dtype)
+        if self.metric == "l2":
+            x_norm = (x_cast * x_cast).sum(dim=1, keepdim=True)
+            y_norm = self._centroid_norm2
+            if y_norm is None:
+                return torch.empty(x.shape[0], 0, dtype=self.dtype, device=self.device)
+            dist = x_norm + y_norm.unsqueeze(0) - (2.0 * (x_cast @ centroids_t))
+            return dist.clamp_min_(0)
+        return x_cast @ centroids_t
+
     def _pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         if y.shape[0] == 0:
             return torch.empty(x.shape[0], 0, dtype=self.dtype, device=self.device)
@@ -1342,4 +1542,13 @@ class IndexIVFFlat(IndexBase):
         return x_cast @ y_cast.t()
 
     def _tensor_attributes(self):
-        return ("_centroids", "_packed_embeddings", "_packed_norms", "_list_ids", "_list_offsets")
+        return (
+            "_centroids",
+            "_packed_embeddings",
+            "_packed_norms",
+            "_list_ids",
+            "_list_offsets",
+            "_centroids_t",
+            "_centroid_norm2",
+            "_list_sizes",
+        )

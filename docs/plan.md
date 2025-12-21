@@ -15,6 +15,30 @@
 
 ## Now（次に潰す：優先順）
 
+### 0) P1 性能改善（Eager-only / Windows+ROCm 維持）
+- [x] Task A: キャッシュ層の追加（PERF-1）
+  - 成果物: `src/torch_ivf/index/ivf_flat.py`, `tests/test_index_ivf_flat.py`
+  - `train/add/reset/max_codes` で `_invalidate_search_cache()` を呼ぶ
+  - `centroids_T`, `centroid_norm2`, `list_sizes`, `effective_max_codes` をキャッシュ
+- [x] Task B: CSR search の同期削減（PERF-2）
+  - 成果物: `src/torch_ivf/index/ivf_flat.py`
+  - `.cpu()/.tolist()/.item()` の回数を削減し、必要なら同期 1 回に集約
+- [x] Task C: ワークスペース再利用（PERF-3）
+  - 成果物: `src/torch_ivf/index/ivf_flat.py`, `tests/test_index_ivf_flat.py`
+  - 再利用バッファ（scores/packed/buf/best）を保持し、容量拡張のみ許容
+  - `device` / `dtype` 変更時の再確保を明示
+- [x] Task D: small-batch 閾値の定数化と説明（PERF-4）
+  - 成果物: `src/torch_ivf/index/ivf_flat.py`, `docs/spec.md`（根拠と閾値）
+  - `avg_group_size` 閾値を定数化し、ベンチで妥当性を確認
+- [x] Task E: テスト追加（キャッシュ invalidate / ワークスペース影響なし）
+  - 成果物: `tests/test_index_ivf_flat.py`
+- [x] Task F: ベンチ更新（変更前後比較）
+  - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`（必要なら）
+  - `scripts/benchmark_sweep_nq.py` / `scripts/benchmark.py` を使用
+- [x] Task G: 速度優先デフォルトON（PERF-6a）/近似モードOFF（PERF-6b）の境界を実装に反映
+  - 成果物: `src/torch_ivf/index/ivf_flat.py`, `docs/spec.md`
+  - デフォルト ON は結果不変の最適化のみとし、近似ノブは明示的に有効化した場合のみ適用
+
 ### 1) CSR vNext の仕上げ（互換・説明・残タスク）
 - [x] **max_codes の prefix ルールを faiss-cpu と合わせる**
   - 既定: 先頭 list は必ず読む / list 境界で止める
@@ -29,19 +53,19 @@
   - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`
 
 ### 2) add の高速化（第3優先）
-- [ ] 大きい追加バッチ時の CPU/ROCm add_ms をベンチで比較し、特に ROCm 側で改善が出るバッチサイズを詰める。
-- [ ] `uv run pytest` と CPU/ROCm ベンチの再取得、`benchmarks/benchmarks.jsonl` / README 更新。
+- [x] 大きい追加バッチ時の CPU/ROCm add_ms をベンチで比較し、特に ROCm 側で改善が出るバッチサイズを詰める。
+- [x] `uv run pytest` と CPU/ROCm ベンチの再取得、`benchmarks/benchmarks.jsonl` / README 更新。
   - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`
 
 ### 3) ヒューリスティクス見直し（動的 chunk / 動的候補上限）
-- [ ] 目標: `nb/nq/nlist/nprobe` の変更で極端に遅くならないこと（ベンチで確認）。
-- [ ] `uv run pytest` と CPU/ROCm ベンチの再取得、`benchmarks/benchmarks.jsonl` / README 更新。
+- [x] 目標: `nb/nq/nlist/nprobe` の変更で極端に遅くならないこと（ベンチで確認）。
+- [x] `uv run pytest` と CPU/ROCm ベンチの再取得、`benchmarks/benchmarks.jsonl` / README 更新。
   - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`, `docs/spec.md`（閾値の根拠）
 
 ### 4) 小バッチ高速化（CSR search の kernel launch 削減）※必要なら追加の詰め
-- [ ] 小バッチ（例: `nq=512`）のプロファイルを取得し、「(i) 小さすぎる GEMM」「(ii) topk/merge 起動回数」「(iii) Python ループ/同期点」の支配を分解する。
+- [x] 小バッチ（例: `nq=512`）のプロファイルを取得し、「(i) 小さすぎる GEMM」「(ii) topk/merge 起動回数」「(iii) Python ループ/同期点」の支配を分解する。
 - [ ] 実装案B（次点）: list-block batching（複数 list をまとめて処理）で GEMM/topk の起動回数を減らす（小バッチのみ）。
-- [ ] 受け入れ条件（大バッチ保護）: `nq=19600` の `csr` が **現状から劣化しない**（少なくとも QPS -5% 以内）。
+- [x] 受け入れ条件（大バッチ保護）: `nq=19600` の `csr` が **現状から劣化しない**（少なくとも QPS -5% 以内）。
   - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`
 
 ---

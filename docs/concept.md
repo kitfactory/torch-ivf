@@ -44,6 +44,24 @@
 4. **最適化**
    - Triton / TorchInductor を使った距離計算カーネル差し替え。
 
+## 性能改善フェーズ（Eager-only / Windows+ROCm 維持）
+本フェーズでは **PyTorch eager + 標準演算のみ** で、小バッチ性能を中心に改善する。大バッチの throughput を悪化させないことを前提とする。
+
+### 機能一覧（Phase: P1）
+| Spec ID | 機能 | 目的 | 依存関係 | MVP / フェーズ |
+|---|---|---|---|---|
+| PERF-0 | P1 共通制約（Eager-only/拡張なし） | 互換性と環境依存の回避 | 全体 | P1 |
+| PERF-1 | 派生テンソルのキャッシュ | 再計算を抑え、小バッチ固定費を削減 | `IndexIVFFlat` | P1 |
+| PERF-2 | CSR 経路の同期削減 | `.cpu()/.tolist()/.item()` を最小化 | `IndexIVFFlat.search(csr)` | P1 |
+| PERF-3 | ワークスペース再利用 | alloc/fill を減らし起動回数を抑制 | `IndexIVFFlat.search(csr)` | P1 |
+| PERF-4 | small-batch buffered 改善 | 小バッチの起動回数削減を最優先 | `IndexIVFFlat.search(csr)` | P1 |
+| PERF-5 | ベンチ再現性の強化 | 変更前後の比較を容易にする | `scripts/benchmark*.py` | P1 |
+| PERF-6a | 速度優先デフォルトON（安全） | 結果不変の範囲で速度を上げる | `IndexIVFFlat.search` | P1 |
+| PERF-6b | 近似モード（デフォルトOFF） | recall 低下を許容して高速化 | `IndexIVFFlat.search` | P1 |
+
+### フェーズ方針
+- P1 は **API 互換・依存追加なし** を必須とし、Windows + ROCm で壊れないことを最優先する。
+
 ## リスクと対策
 - **PyTorch 実装の性能不足**: Triton kernel や専用カーネルでホットスポットを最適化できる余地がある。必要に応じてバックエンドを差し替える抽象化を先に整備。
 - **ROCm on Windows の成熟度**: 新しい ROCm リリースで API が変わる可能性。CI に nightly ROCm PyTorch を追加し早期検知。

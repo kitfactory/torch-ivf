@@ -4,7 +4,7 @@
 The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with a strong focus on Windows + ROCm).
 
 - 🔁 **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
-- 📈 **Up to 4.75x vs faiss-cpu in the throughput regime** (`nq=19600`: 47,302 / 9,962 ≒ 4.75x)
+- 📈 **Up to 4.59x vs faiss-cpu in the throughput regime** (`nq=19600`: 44,686 / 9,740 ≒ 4.59x)
 - 🧩 **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
 - 🧪 **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
 
@@ -45,16 +45,26 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 
 > Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > Environment: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
-> Updated: `2025-12-14T10:40:28` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
+> Updated: `2025-12-21T13:43:37` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
 >
 > Note: this table is **fixed to `search_mode=csr`** to highlight the throughput regime. For normal usage, `search_mode=auto` is recommended.
 > faiss-cpu uses the default thread settings (environment-dependent). For reproducibility, fix `OMP_NUM_THREADS` (e.g. Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`).
 
 | nq | torch-ivf (ROCm GPU, csr) | faiss-cpu (CPU) |
 |---:|---:|---:|
-| 512 | **17,656 QPS** | 7,140 QPS |
-| 2,048 | **29,553 QPS** | 8,264 QPS |
-| 19,600 | **47,302 QPS** | 9,962 QPS |
+| 512 | **14,197 QPS** | 6,157 QPS |
+| 2,048 | **33,686 QPS** | 7,909 QPS |
+| 19,600 | **44,686 QPS** | 9,740 QPS |
+
+### Add performance (batch size sweep)
+
+> Updated: `2025-12-21T13:28:06` (`scripts/benchmark.py`, `add_ms` is elapsed time for one add)
+
+| nb | torch-ivf (ROCm GPU) add_ms | torch-ivf (CPU) add_ms |
+|---:|---:|---:|
+| 65,536 | 810.0 ms | 1,175.5 ms |
+| 131,072 | 1,100.8 ms | 2,358.4 ms |
+| 262,144 | 848.8 ms | 4,738.9 ms |
 
 ### Chart: QPS vs nq (tiny-batch → throughput)
 

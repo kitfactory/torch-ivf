@@ -143,3 +143,42 @@ def test_ivf_search_csr_matches_matrix_when_max_codes_unlimited():
 
     assert torch.allclose(D_matrix.cpu(), D_csr.cpu(), atol=1e-5)
     assert torch.equal(I_matrix.cpu(), I_csr.cpu())
+
+
+def test_ivf_search_cache_invalidated_on_add_and_max_codes():
+    xb, xq = _toy_data(d=8, nb=64, nq=4, seed=5)
+    index = IndexIVFFlat(8, nlist=8)
+    index.train(xb)
+    index.add(xb)
+    index.search_mode = "csr"
+
+    index.max_codes = 10
+    index.search(xq, k=3)
+    assert index._effective_max_codes_cache is not None
+
+    index.max_codes = 5
+    assert index._effective_max_codes_cache is None
+
+    index.search(xq, k=3)
+    assert index._list_sizes is not None
+
+    index.add(xb[:8])
+    assert index._list_sizes is None
+    assert index._effective_max_codes_cache is None
+
+
+def test_ivf_workspace_reuse_does_not_change_results():
+    xb, xq = _toy_data(d=16, nb=128, nq=8, seed=6)
+    index = IndexIVFFlat(16, nlist=32, nprobe=8)
+    index.train(xb)
+    index.add(xb)
+    index.search_mode = "csr"
+
+    d1, i1 = index.search(xq, k=5)
+    caps = dict(index._workspace.capacity)
+    d2, i2 = index.search(xq, k=5)
+
+    assert torch.allclose(d1.cpu(), d2.cpu(), atol=1e-6)
+    assert torch.equal(i1.cpu(), i2.cpu())
+    for name, cap in caps.items():
+        assert index._workspace.capacity[name] >= cap

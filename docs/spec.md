@@ -426,3 +426,56 @@ def search_ivf_csr(
 2. `torch_ivf.adapters.faiss` を追加し、`from_faiss` / `to_faiss` を提供する。
 3. Triton / TorchInductor ベースのカスタム距離計算カーネルを PoC し、GPU でのレイテンシ改善を図る。
 4. 各大きな実装変更後に本仕様と `docs/plan.md` を更新し、ドキュメントと実装を同期させる。
+
+## 12. Performance Improvement (Phase P1)
+
+### 12.1 P1 共通制約（Spec ID: PERF-0）
+- 前提: Phase P1 の性能改善は Windows + ROCm を含む GPU 環境の互換性維持を最優先とする。
+- 条件: P1 の実装を追加・変更する場合。
+- 振る舞い: `torch.compile` を使用しない。独自カーネル（Triton/CUDA/ROCm/C++ 拡張）を導入しない。PyTorch eager + 標準演算のみを使用する。追加依存は原則なしとする。既存 API 互換性（`IndexIVFFlat.search_mode`, `max_codes`, `IndexFlat*`）を維持する。
+
+### 12.2 派生テンソルのキャッシュ導入（Spec ID: PERF-1）
+- 前提: `IndexIVFFlat` は `train` / `add` / `reset` / `max_codes` 変更によって内部状態が更新される。
+- 条件: `search` を呼び出す場合。
+- 振る舞い: `centroids_T`, `centroid_norm2`, `list_sizes`, `effective_max_codes` などの派生テンソルはキャッシュを利用し、上記の更新操作時にのみ無効化・再計算する。キャッシュの有無によって検索結果（距離/ID）は変化しない。
+
+### 12.3 CSR 経路の同期削減（Spec ID: PERF-2）
+- 前提: `IndexIVFFlat.search_mode="csr"` の search パスを実行する。
+- 条件: `search` 内で Python ループが必要な場合。
+- 振る舞い: `to("cpu")` / `tolist()` / `item()` の回数を最小化し、必要な場合も同期点を 1 回に集約する。不要な同期点は削除し、GPU 側の処理を優先する。
+
+### 12.4 ワークスペース（バッファ）再利用（Spec ID: PERF-3）
+- 前提: `IndexIVFFlat.search_mode="csr"` の search パスで大きなテンソル確保が頻発する。
+- 条件: `search` を繰り返し実行する場合。
+- 振る舞い: `task_scores` / `task_packed` / `buf_scores` / `buf_packed` / `best_scores` / `best_packed` などのワークスペースを再利用する。必要サイズが増えた場合のみ拡張し、縮小は行わないか抑制する。`device`/`dtype` 変更時は再確保する。
+
+### 12.5 small-batch buffered 経路の改善（Spec ID: PERF-4）
+- 前提: `IndexIVFFlat.search_mode="csr"` で小バッチ領域が存在する。
+- 条件: `avg_group_size` などの指標が閾値を下回る場合。
+- 振る舞い: 小バッチ専用の buffered 経路で起動回数削減を優先する。閾値は定数化し、ベンチ結果に基づく調整を許容する。大バッチ（throughput）条件では既存の高速経路を維持する。
+- 補足: 閾値は `csr_small_batch_avg_group_threshold`（既定 64.0）として公開し、ベンチ結果に応じて調整できるようにする。
+- 補足: `chunk_size * max_candidates` が `candidate_budget` を下回る場合、small-batch では index-matrix 経路を選択し、list 単位の細かなループを減らす。
+
+### 12.6 ベンチ再現性と受け入れ基準（Spec ID: PERF-5）
+- 前提: `scripts/benchmark.py` / `scripts/benchmark_sweep_nq.py` を使用できる。
+- 条件: P1 変更前後の比較を行う場合。
+- 振る舞い: `benchmarks/benchmarks.jsonl` に結果を追記し、代表表の更新が必要であれば `README.md` を更新する。代表条件（`nb=262144, nlist=512, nprobe=32, k=20, train_n=20480, dtype=float32`）において、`nq<=128` のいずれかで `search_ms` が 10% 以上改善する。`nq=19600` の `search_ms` は現状比 -5% を超えて悪化しない。`matrix` 経路の劣化がある場合は理由を記録する。
+
+### 12.7 速度優先デフォルトON（安全）（Spec ID: PERF-6a）
+- 前提: `IndexIVFFlat.search` の既存仕様（精度・挙動）を維持する必要がある。
+- 条件: 速度改善を「結果不変（または既存の浮動小数誤差のみ）」の範囲で適用する場合。
+- 振る舞い: 以下は **デフォルト ON** とし、検索結果（距離/ID）を変えない範囲で最適化する。
+  - キャッシュ利用、同期削減、ワークスペース再利用。
+  - `search_mode="auto"` の閾値調整、chunk サイズ推定、並べ替え・集約方法の改善。
+  - 動的候補上限とチャンクサイズ推定（`candidate_budget` を `d` と `dtype` から算出し、`csr` の `vec_chunk` も同様に算出する）。
+- 例外: dtype の強制変更は行わない（ユーザー指定の dtype を尊重する）。
+
+### 12.8 近似モード（デフォルトOFF）（Spec ID: PERF-6b）
+- 前提: 速度優先のために recall の低下を許容できる場合がある。
+- 条件: 近似ノブを有効化する場合。
+- 振る舞い: 以下は **デフォルト OFF** とし、明示的に有効化した場合のみ適用する。
+  - 動的 `max_codes`、早期打ち切り、probe 数の動的削減。
+  - 粗→精の段階化（候補の一部のみ精査）。
+- 補足: 近似モードの有効化は `approximate_mode` など明示的なフラグで行う。
+- 受け入れ条件: 近似モードの精度劣化は指標と閾値を定義して評価する（例: `max_codes=0` 基準の `recall@k >= 0.98`）。
+- 注意: 段階化は「probed lists 内の厳密 top-k」から逸脱し得るため、適用条件（`nlist`/list 長の偏りなど）を明記する。
