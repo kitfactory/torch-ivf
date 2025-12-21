@@ -56,8 +56,15 @@
 | PERF-3 | ワークスペース再利用 | alloc/fill を減らし起動回数を抑制 | `IndexIVFFlat.search(csr)` | P1 |
 | PERF-4 | small-batch buffered 改善 | 小バッチの起動回数削減を最優先 | `IndexIVFFlat.search(csr)` | P1 |
 | PERF-5 | ベンチ再現性の強化 | 変更前後の比較を容易にする | `scripts/benchmark*.py` | P1 |
-| PERF-6a | 速度優先デフォルトON（安全） | 結果不変の範囲で速度を上げる | `IndexIVFFlat.search` | P1 |
+| PERF-6a | 速度優先デフォルトON（結果不変） | 結果不変の範囲で高速化 | `IndexIVFFlat.search` | P1 |
 | PERF-6b | 近似モード（デフォルトOFF） | recall 低下を許容して高速化 | `IndexIVFFlat.search` | P1 |
+| PERF-6c | SearchParams / profile | 後方互換の設定 I/F を追加 | `IndexIVFFlat.search` | P1 |
+| PERF-6a.1 | Safe pruning（L2） | Exact のまま候補を削る | `IndexIVFFlat.search` | P1 |
+| PERF-6a.2 | subcluster bound | Exact のまま候補を削る | `IndexIVFFlat.search` | P1 |
+| PERF-6b.1 | 候補予算配分（strategy） | 同じ budget で recall を稼ぐ | `IndexIVFFlat.search` | P1 |
+| PERF-6b.2 | list ordering | partial scan の当たりを上げる | `IndexIVFFlat` | P1 |
+| PERF-6b.3 | 品質ゲート | recall 下限を明示し事故を防ぐ | `tests/` | P1 |
+| PERF-6b.4 | anchors プレフィルタ | 見込み list だけに予算を配る | `IndexIVFFlat.search` | P1 |
 
 ### フェーズ方針
 - P1 は **API 互換・依存追加なし** を必須とし、Windows + ROCm で壊れないことを最優先する。

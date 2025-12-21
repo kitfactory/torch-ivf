@@ -68,6 +68,28 @@
 - [x] 受け入れ条件（大バッチ保護）: `nq=19600` の `csr` が **現状から劣化しない**（少なくとも QPS -5% 以内）。
   - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`
 
+### 5) 近似/設定強化（PERF-6c / PERF-6b / PERF-6a.1 / PERF-6a.2）
+- [ ] SearchParams / profile（PERF-6c）
+  - `search(xq, k, *, params=None)` を追加し、後方互換を維持
+  - `profile=exact/speed/approx` の既定と優先順位を整理
+  - `candidate_budget` 等の入力バリデーションを追加
+- [ ] Safe pruning（PERF-6a.1）
+  - `list_radius` を保持し、`lb(l)` による list 単位スキップを実装（L2 のみ）
+- [ ] Candidate budgeting strategy（PERF-6b.1）
+  - `candidate_budget`, `budget_strategy`（uniform/distance_weighted）を実装
+  - `min_codes_per_list`, `max_codes_cap_per_list`, `strict_budget`, `dynamic_nprobe` を追加
+  - `max_codes`/`nprobe` との優先順位ルールを実装
+- [ ] In-list ordering（PERF-6b.2）
+  - `list_ordering`（residual_norm_asc / proj_desc）を実装
+  - `rebuild_policy`（manual/auto_threshold）と unsorted tail 運用を明確化
+- [ ] 品質ゲート（PERF-6b.3）
+  - `recall@k` の下限（16k/32k/64k）を定義
+  - baseline と fallback の条件を整備
+- [ ] anchors プレフィルタ（PERF-6b.4）※任意
+  - list ごとに anchor を保持し、見込み list を絞って配分
+- [ ] subcluster bound（PERF-6a.2）※任意
+  - Exact のまま subcluster 単位でスキップできるようにする
+
 ---
 
 ## Next（相互運用・オプション高速化）

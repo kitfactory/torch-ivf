@@ -461,21 +461,87 @@ def search_ivf_csr(
 - 条件: P1 変更前後の比較を行う場合。
 - 振る舞い: `benchmarks/benchmarks.jsonl` に結果を追記し、代表表の更新が必要であれば `README.md` を更新する。代表条件（`nb=262144, nlist=512, nprobe=32, k=20, train_n=20480, dtype=float32`）において、`nq<=128` のいずれかで `search_ms` が 10% 以上改善する。`nq=19600` の `search_ms` は現状比 -5% を超えて悪化しない。`matrix` 経路の劣化がある場合は理由を記録する。
 
-### 12.7 速度優先デフォルトON（安全）（Spec ID: PERF-6a）
+### 12.7 SearchParams / profile（Spec ID: PERF-6c）
+- 前提: `IndexIVFFlat.search` は既存呼び出しとの互換性を維持する。
+- 条件: `search(xq, k, *, params: Optional[SearchParams] = None)` を呼び出す。
+- 振る舞い: `params is None` の場合は `profile="speed"` 相当として扱う。`profile="exact"` は PERF-6a/6b を無効化し、`profile="speed"` は PERF-6a を有効化し PERF-6b を無効化する。`profile="approx"` は PERF-6a と PERF-6b を有効化する。`params` の明示的な値は profile の既定より優先する。
+- SearchParams の構成（後方互換）:
+  - `profile: Literal["exact","speed","approx"] = "speed"`
+  - `safe_pruning: bool = True`（L2 のみ有効）
+  - `approximate: bool = False`
+  - `candidate_budget: Optional[int] = None`
+  - `budget_strategy: Literal["uniform","distance_weighted"] = "distance_weighted"`
+  - `list_ordering: Optional[Literal["none","residual_norm_asc","proj_desc"]] = None`
+  - `rebuild_policy: Literal["manual","auto_threshold"] = "manual"`
+  - `rebuild_threshold_adds: int = 0`
+  - `dynamic_nprobe: bool = False`
+  - `min_codes_per_list: int = 0`
+  - `max_codes_cap_per_list: int = 0`
+  - `strict_budget: bool = False`
+- 入力バリデーション: `candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。
+
+### 12.8 速度優先デフォルトON（結果不変）（Spec ID: PERF-6a）
 - 前提: `IndexIVFFlat.search` の既存仕様（精度・挙動）を維持する必要がある。
 - 条件: 速度改善を「結果不変（または既存の浮動小数誤差のみ）」の範囲で適用する場合。
 - 振る舞い: 以下は **デフォルト ON** とし、検索結果（距離/ID）を変えない範囲で最適化する。
   - キャッシュ利用、同期削減、ワークスペース再利用。
   - `search_mode="auto"` の閾値調整、chunk サイズ推定、並べ替え・集約方法の改善。
-  - 動的候補上限とチャンクサイズ推定（`candidate_budget` を `d` と `dtype` から算出し、`csr` の `vec_chunk` も同様に算出する）。
+  - `vec_chunk` などのチャンクサイズ推定は `d`/`dtype` に基づいて行う。
 - 例外: dtype の強制変更は行わない（ユーザー指定の dtype を尊重する）。
 
-### 12.8 近似モード（デフォルトOFF）（Spec ID: PERF-6b）
+### 12.9 Safe pruning（L2）（Spec ID: PERF-6a.1）
+- 前提: 結果不変（Exact）のまま候補削減を行いたい。
+- 条件: `metric="l2"` かつ `safe_pruning=True` の場合。
+- 振る舞い: list ごとに `list_radius`（centroid からの最大残差ノルム上界）を保持し、`lb(l) = max(0, ||q - c_l|| - r_l)^2` を用いて `kth_best` より大きい list をスキップする。結果は不変とする。
+- 補足: `metric="ip"` の場合は安全な下界設計が困難なため無効化する。
+
+### 12.10 近似モード（デフォルトOFF）（Spec ID: PERF-6b）
 - 前提: 速度優先のために recall の低下を許容できる場合がある。
-- 条件: 近似ノブを有効化する場合。
-- 振る舞い: 以下は **デフォルト OFF** とし、明示的に有効化した場合のみ適用する。
-  - 動的 `max_codes`、早期打ち切り、probe 数の動的削減。
-  - 粗→精の段階化（候補の一部のみ精査）。
-- 補足: 近似モードの有効化は `approximate_mode` など明示的なフラグで行う。
-- 受け入れ条件: 近似モードの精度劣化は指標と閾値を定義して評価する（例: `max_codes=0` 基準の `recall@k >= 0.98`）。
-- 注意: 段階化は「probed lists 内の厳密 top-k」から逸脱し得るため、適用条件（`nlist`/list 長の偏りなど）を明記する。
+- 条件: `approximate=True` または `profile="approx"` を明示的に指定する場合。
+- 振る舞い: PERF-6b の各ノブは **デフォルト OFF** とし、明示的に有効化した場合のみ適用する。結果の精度低下は受け入れ基準（品質ゲート）で管理する。
+- 補足: `approximate=True` でも `candidate_budget` と `max_codes` が共に無制限の場合は結果不変になり得るが、期待される速度向上は限定的となる。
+
+### 12.11 候補予算配分（Spec ID: PERF-6b.1）
+- 前提: `approximate=True` で候補削減を行う。
+- 条件: `candidate_budget` と `budget_strategy` を解釈し、`max_codes` / `nprobe` との整合を取る。
+- 振る舞い: 用語は `nprobe_user`, `max_codes_user`（0 は無制限）, `candidate_budget` とする。
+  - Exact（`approximate=False`）: `max_codes_eff = max_codes_user`, `nprobe_eff = nprobe_user`。
+  - Approx（`approximate=True`）: `nprobe_eff = nprobe_user`（`dynamic_nprobe=True` の場合でも上限は `nprobe_user`）。`candidate_budget` が指定される場合は `max_codes_from_budget = ceil(candidate_budget / nprobe_eff)` を求め、`max_codes_eff = min_positive(max_codes_user, max_codes_from_budget)` とする。
+  - list ごとの上限は `max_codes_list = min(list_size_i, max_codes_eff, max_codes_cap_per_list if > 0)` とし、下限は `max(max_codes_list, min_codes_per_list if > 0)` を適用する。
+  - `strict_budget=True` の場合は最終的な `sum(max_codes_list)` が `candidate_budget` を超えないよう比例縮小する（`min_codes_per_list` は守る）。
+- 予算配分 strategy:
+  - `uniform`: `m_i = ceil(candidate_budget / nprobe_eff)` を基本とする。
+  - `distance_weighted`: `d_i` を centroid 距離（L2）または `-score`（IP）とし、`z_i = (d_i - d_min) / (d_med - d_min + eps)`（`eps=1e-6`）を用いて正規化する。`z_i` は `[0, z_cap]`（`z_cap=8`）に clamp し、`w_i = exp(-alpha0 * z_i)`（`alpha0=3.0`）を計算する。`m_i = round(candidate_budget * w_i / sum(w))` を割り当て、上限/下限を適用する。
+- 補足: `min_positive(a, b)` は正の値のみから最小を取る（0/None は無制限扱い）。
+- 補足: `candidate_budget` が未指定の場合は `max_codes_user` のみで制限を決め、予算配分は行わない。
+
+### 12.12 list ordering / rebuild（Spec ID: PERF-6b.2）
+- 前提: `approximate=True` かつ `max_codes` / `candidate_budget` により partial scan が発生する。
+- 条件: `list_ordering` と `rebuild_policy` を解釈する。
+- 振る舞い: `list_ordering=None` の場合は metric により既定値を選ぶ（L2 は `residual_norm_asc`、IP は `proj_desc`）。`list_ordering="none"` の場合は並べ替えを行わない。
+  - `residual_norm_asc`: L2 の場合、`r = x - c` の `||r||` 昇順で並べる。
+  - `proj_desc`: IP の場合、`x·c_hat` 降順で並べる（`c_hat` は centroid の正規化）。
+- `rebuild_policy`:
+  - `manual`: ユーザーが `rebuild_lists()` を呼ぶまで並べ替えを行わない。
+  - `auto_threshold`: `add` の累積が `rebuild_threshold_adds` を超えたら rebuild を促す（自動実行は任意）。
+- 補足: 追加データは unsorted tail として保持し、search 時は sorted 領域と tail を別枠で読み分ける（P1 ではこの挙動を採用する）。
+
+### 12.13 品質ゲート（Spec ID: PERF-6b.3）
+- 前提: `approximate=True` の設定を出荷する。
+- 条件: `recall@k` を **同一 IVF・`max_codes=0`・`approximate=False`** のベースラインと比較する。
+- 振る舞い: `candidate_budget` のプリセットに対して下限を満たさない設定は無効化または fallback する。
+  - `approx_64k`: `recall@k >= 0.995`
+  - `approx_32k`: `recall@k >= 0.990`
+  - `approx_16k`: `recall@k >= 0.980`
+- 補足: `nq=2048` と `nq=19600` の双方で閾値を満たすことを必須とする。
+
+### 12.14 subcluster bound（Spec ID: PERF-6a.2）
+- 前提: 結果不変（Exact）で候補削減を行いたい。
+- 条件: list 内を `k_sub` で分割し、`sub_centroid` と `sub_radius` を保持する。
+- 振る舞い: L2 では `lower_bound(q, sub) = ||q - sub_centroid|| - sub_radius` を用いて、現在の k 番目より大きい subcluster をスキップする（結果は不変）。
+- 補足: IP での上界/下界は別途定義が必要なため、初期実装は L2 のみ対象とする。
+
+### 12.15 anchors プレフィルタ（Spec ID: PERF-6b.4）
+- 前提: `approximate=True` で list の候補数をさらに減らしたい。
+- 条件: 各 list に小さな代表集合（anchors, 例: 32/64 点）を保持する。
+- 振る舞い: anchor の距離で見込みのある list を選び、`candidate_budget` を割り当てる対象を減らす。
