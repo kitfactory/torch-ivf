@@ -466,6 +466,7 @@ def search_ivf_csr(
 - 前提: `IndexIVFFlat.search` は既存呼び出しとの互換性を維持する。
 - 条件: `search(xq, k, *, params: Optional[SearchParams] = None)` を呼び出す。
 - 振る舞い: `params is None` の場合は `profile="speed"` 相当として扱う。`profile="exact"` は PERF-6a/6b を無効化し、`profile="speed"` は PERF-6a を有効化し PERF-6b を無効化する。`profile="approx"` は PERF-6a と PERF-6b を有効化する。`params` の明示的な値は profile の既定より優先する。
+- 補足: `profile="exact"` は「近似を行わない」を意味し、結果不変の最適化（キャッシュ/ワークスペース/安全剪定）は許容する。
 - SearchParams の構成（後方互換）:
   - `profile: Literal["exact","speed","approx"] = "speed"`
   - `safe_pruning: bool = True`（L2 のみ有効）
@@ -482,7 +483,7 @@ def search_ivf_csr(
   - `max_codes_cap_per_list: int = 0`
   - `strict_budget: bool = False`
 - 解決順序: `profile` は既定値テンプレとして使い、`IndexIVFFlat` の設定を上書きしない。明示的な SearchParams の値は `IndexIVFFlat` の設定より常に優先する。
-- 入力バリデーション: `nprobe` は 1 以上、`max_codes` は 0 以上でなければならない。`candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。
+- 入力バリデーション: `nprobe` は 1 以上、`max_codes` は 0 以上でなければならない。`candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。`nprobe > nlist` の場合は `nprobe_eff = nlist` に clamp する。
 
 ### 12.8 速度優先デフォルトON（結果不変）（Spec ID: PERF-6a）
 - 前提: `IndexIVFFlat.search` の既存仕様（精度・挙動）を維持する必要がある。
@@ -520,6 +521,8 @@ def search_ivf_csr(
   - `distance_weighted`: `d_i` を centroid 距離（L2）または `-score`（IP）とし、`z_i = (d_i - d_min) / (d_med - d_min + eps)`（`eps=1e-6`）を用いて正規化する。`z_i` は `[0, z_cap]`（`z_cap=8`）に clamp し、`w_i = exp(-alpha0 * z_i)`（`alpha0=3.0`）を計算する。`m_i = round(candidate_budget * w_i / sum(w))` を割り当て、上限/下限を適用する。
 - 補足: `min_positive(a, b)` は正の値のみから最小を取る（0/None は無制限扱い）。
 - 補足: `candidate_budget` が未指定の場合は `max_codes_user` のみで制限を決め、予算配分は行わない。
+- 補足: `dynamic_nprobe` は `budget_strategy="distance_weighted"` の場合のみ有効とする。
+- 補足: `dynamic_nprobe=True` の場合は、list を近い順（`w_i` 降順）に並べ、`min_codes_per_list` を先に配り、残予算を按分する。残予算が尽きた list 以降は `m_i=0` とし、`nprobe_eff = count(m_i > 0)` とする（`1 <= nprobe_eff <= nprobe_user`）。
 
 ### 12.12 list ordering / rebuild（Spec ID: PERF-6b.2）
 - 前提: `approximate=True` かつ `max_codes` / `candidate_budget` により partial scan が発生する。

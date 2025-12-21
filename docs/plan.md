@@ -81,7 +81,8 @@
 - [ ] Candidate budgeting strategy（PERF-6b.1）
   - `candidate_budget`, `budget_strategy`（uniform/distance_weighted）を実装
   - `min_codes_per_list`, `max_codes_cap_per_list`, `strict_budget`, `dynamic_nprobe` を追加
-  - `dynamic_nprobe` は上限 `nprobe_user` を必ず守る（減少のみ）
+  - `dynamic_nprobe` は distance_weighted のみ有効、上限 `nprobe_user` を必ず守る（減少のみ）
+  - `m_i=0` になる条件（残予算枯渇）を仕様どおり固定
   - `max_codes`/`nprobe` との優先順位ルールを実装
 - [ ] In-list ordering（PERF-6b.2）
   - `list_ordering`（residual_norm_asc / proj_desc）を実装

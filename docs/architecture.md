@@ -52,7 +52,7 @@ class SearchParams:
     strict_budget: bool
 ```
 
-解決順序: profile の既定値 → Index 設定 → 明示 SearchParams。`dynamic_nprobe` は `nprobe_user` を上限として減少のみ許可する。
+解決順序: profile の既定値 → Index 設定 → 明示 SearchParams。`dynamic_nprobe` は `budget_strategy="distance_weighted"` のみ有効で、`nprobe_user` を上限として減少のみ許可する。
 
 ### キャッシュ I/F（内部）
 ```python
