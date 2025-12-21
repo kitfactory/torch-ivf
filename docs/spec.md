@@ -433,6 +433,7 @@ def search_ivf_csr(
 - 前提: Phase P1 の性能改善は Windows + ROCm を含む GPU 環境の互換性維持を最優先とする。
 - 条件: P1 の実装を追加・変更する場合。
 - 振る舞い: `torch.compile` を使用しない。独自カーネル（Triton/CUDA/ROCm/C++ 拡張）を導入しない。PyTorch eager + 標準演算のみを使用する。追加依存は原則なしとする。既存 API 互換性（`IndexIVFFlat.search_mode`, `max_codes`, `IndexFlat*`）を維持する。
+- 振る舞い: P1 は `metric="l2"` のみを対象とし、IP は Phase 2 で対応する。
 
 ### 12.2 派生テンソルのキャッシュ導入（Spec ID: PERF-1）
 - 前提: `IndexIVFFlat` は `train` / `add` / `reset` / `max_codes` 変更によって内部状態が更新される。
@@ -469,6 +470,8 @@ def search_ivf_csr(
   - `profile: Literal["exact","speed","approx"] = "speed"`
   - `safe_pruning: bool = True`（L2 のみ有効）
   - `approximate: bool = False`
+  - `nprobe: Optional[int] = None`
+  - `max_codes: Optional[int] = None`
   - `candidate_budget: Optional[int] = None`
   - `budget_strategy: Literal["uniform","distance_weighted"] = "distance_weighted"`
   - `list_ordering: Optional[Literal["none","residual_norm_asc","proj_desc"]] = None`
@@ -478,7 +481,8 @@ def search_ivf_csr(
   - `min_codes_per_list: int = 0`
   - `max_codes_cap_per_list: int = 0`
   - `strict_budget: bool = False`
-- 入力バリデーション: `candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。
+- 解決順序: `profile` は既定値テンプレとして使い、`IndexIVFFlat` の設定を上書きしない。明示的な SearchParams の値は `IndexIVFFlat` の設定より常に優先する。
+- 入力バリデーション: `nprobe` は 1 以上、`max_codes` は 0 以上でなければならない。`candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。
 
 ### 12.8 速度優先デフォルトON（結果不変）（Spec ID: PERF-6a）
 - 前提: `IndexIVFFlat.search` の既存仕様（精度・挙動）を維持する必要がある。
@@ -505,8 +509,10 @@ def search_ivf_csr(
 - 前提: `approximate=True` で候補削減を行う。
 - 条件: `candidate_budget` と `budget_strategy` を解釈し、`max_codes` / `nprobe` との整合を取る。
 - 振る舞い: 用語は `nprobe_user`, `max_codes_user`（0 は無制限）, `candidate_budget` とする。
+  - `nprobe_user` は `params.nprobe` があればそれを用い、無ければ `IndexIVFFlat.nprobe` を用いる。
+  - `max_codes_user` は `params.max_codes` があればそれを用い、無ければ `IndexIVFFlat.max_codes` を用いる。
   - Exact（`approximate=False`）: `max_codes_eff = max_codes_user`, `nprobe_eff = nprobe_user`。
-  - Approx（`approximate=True`）: `nprobe_eff = nprobe_user`（`dynamic_nprobe=True` の場合でも上限は `nprobe_user`）。`candidate_budget` が指定される場合は `max_codes_from_budget = ceil(candidate_budget / nprobe_eff)` を求め、`max_codes_eff = min_positive(max_codes_user, max_codes_from_budget)` とする。
+  - Approx（`approximate=True`）: `nprobe_eff = nprobe_user`（`dynamic_nprobe=True` の場合でも上限は `nprobe_user`。減少のみ許可）。`candidate_budget` が指定される場合は `max_codes_from_budget = ceil(candidate_budget / nprobe_eff)` を求め、`max_codes_eff = min_positive(max_codes_user, max_codes_from_budget)` とする。
   - list ごとの上限は `max_codes_list = min(list_size_i, max_codes_eff, max_codes_cap_per_list if > 0)` とし、下限は `max(max_codes_list, min_codes_per_list if > 0)` を適用する。
   - `strict_budget=True` の場合は最終的な `sum(max_codes_list)` が `candidate_budget` を超えないよう比例縮小する（`min_codes_per_list` は守る）。
 - 予算配分 strategy:
@@ -543,5 +549,5 @@ def search_ivf_csr(
 
 ### 12.15 anchors プレフィルタ（Spec ID: PERF-6b.4）
 - 前提: `approximate=True` で list の候補数をさらに減らしたい。
-- 条件: 各 list に小さな代表集合（anchors, 例: 32/64 点）を保持する。
+- 条件: 各 list に小さな代表集合（anchors）を保持する。既定は 64 とし、`avg_list_size < 64` の場合は `min(32, avg_list_size)` へ自動縮退する。
 - 振る舞い: anchor の距離で見込みのある list を選び、`candidate_budget` を割り当てる対象を減らす。

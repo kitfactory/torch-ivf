@@ -39,6 +39,8 @@ class SearchParams:
     profile: str  # exact / speed / approx
     safe_pruning: bool
     approximate: bool
+    nprobe: int | None
+    max_codes: int | None
     candidate_budget: int | None
     budget_strategy: str  # uniform / distance_weighted
     list_ordering: str | None  # none / residual_norm_asc / proj_desc
@@ -49,6 +51,8 @@ class SearchParams:
     max_codes_cap_per_list: int
     strict_budget: bool
 ```
+
+解決順序: profile の既定値 → Index 設定 → 明示 SearchParams。`dynamic_nprobe` は `nprobe_user` を上限として減少のみ許可する。
 
 ### キャッシュ I/F（内部）
 ```python
@@ -106,6 +110,7 @@ class _AnchorPrefilter:
 - **互換性**: 既存 API・挙動（検索結果）を維持する。
 - **Eager-only**: `torch.compile` や独自カーネルに依存しない。
 - **メモリ安全性**: 既存の chunking/streaming による OOM 回避を壊さない。
+- **P1 対象**: P1 は L2 のみを対象とし、IP は Phase 2 で対応する。
 
 ## ログ/エラー方針
 - 例外は `ValueError` / `RuntimeError` を継続使用する。

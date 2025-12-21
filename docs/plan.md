@@ -69,15 +69,19 @@
   - 成果物: `benchmarks/benchmarks.jsonl`, `README.md`
 
 ### 5) 近似/設定強化（PERF-6c / PERF-6b / PERF-6a.1 / PERF-6a.2）
+- [ ] P1 対象の明文化（L2 のみ / IP は Phase 2）
+  - 仕様と実装の分岐点を整理し、P1 では L2 を優先する
 - [ ] SearchParams / profile（PERF-6c）
   - `search(xq, k, *, params=None)` を追加し、後方互換を維持
   - `profile=exact/speed/approx` の既定と優先順位を整理
-  - `candidate_budget` 等の入力バリデーションを追加
+  - 明示 params > Index 設定 > profile 既定 の優先順位を固定
+  - `nprobe` / `max_codes` を SearchParams に追加し、入力バリデーションを追加
 - [ ] Safe pruning（PERF-6a.1）
   - `list_radius` を保持し、`lb(l)` による list 単位スキップを実装（L2 のみ）
 - [ ] Candidate budgeting strategy（PERF-6b.1）
   - `candidate_budget`, `budget_strategy`（uniform/distance_weighted）を実装
   - `min_codes_per_list`, `max_codes_cap_per_list`, `strict_budget`, `dynamic_nprobe` を追加
+  - `dynamic_nprobe` は上限 `nprobe_user` を必ず守る（減少のみ）
   - `max_codes`/`nprobe` との優先順位ルールを実装
 - [ ] In-list ordering（PERF-6b.2）
   - `list_ordering`（residual_norm_asc / proj_desc）を実装
@@ -87,6 +91,7 @@
   - baseline と fallback の条件を整備
 - [ ] anchors プレフィルタ（PERF-6b.4）※任意
   - list ごとに anchor を保持し、見込み list を絞って配分
+  - 既定 64、`avg_list_size < 64` の場合は `min(32, avg_list_size)` に縮退
 - [ ] subcluster bound（PERF-6a.2）※任意
   - Exact のまま subcluster 単位でスキップできるようにする
 
