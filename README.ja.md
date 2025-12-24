@@ -62,15 +62,16 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 - `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")`（L2のみ）。
 
 
-### ????????per-list ???
 
-`SearchParams.profile` ????????per-list ???????????????
+### 近似プリセット（per-list 予算）
+
+`SearchParams.profile` は per-list 予算つきの近似プリセットをサポートします。
 
 - `approx_fast`: `candidate_budget=32768`, `use_per_list_sizes=True`
 - `approx_balanced`: `candidate_budget=65536`, `use_per_list_sizes=True`
-- `approx_quality`: `candidate_budget=131072`, `use_per_list_sizes=True`??????? recall?0.995?
+- `approx_quality`: `candidate_budget=131072`, `use_per_list_sizes=True`（下のベンチで recall~0.995）
 
-?:
+例:
 
 ```python
 from torch_ivf.index import SearchParams
@@ -78,22 +79,23 @@ from torch_ivf.index import SearchParams
 params = SearchParams(profile="approx_quality")
 scores, ids = index.search(xq, k=20, params=params)
 
-# ????????????????:
+# 明示的に上書きすることも可能です:
 params = SearchParams(profile="approx_quality", candidate_budget=98304)
 ```
 
-### ???????????per-list, csr?
+### プリセットの測定結果（per-list, csr）
 
-> ?????????`seed=1234`, `search_mode=csr`?
+> 上の表と同じ環境。`seed=1234`, `search_mode=csr`。
 
-| candidate_budget | QPS | recall@k?unlimited ?? |
+| candidate_budget | QPS | recall@k（unlimited 比） |
 |---:|---:|---:|
 | 32,768 | 54.9k | 0.930242 |
 | 65,536 | 51.9k | 0.976895 |
 | 98,304 | 53.8k | 0.990066 |
 | 131,072 | 50.8k | 0.995046 |
 
-??: 98,304??96k?? recall?0.99 ????0.995 ????????????
+注: 98,304（約96k）は recall~0.99 まで到達しますが、0.995 のゲートは満たしません。
+
 
 ### グラフ：QPS vs nq（tiny-batch → throughput）
 
