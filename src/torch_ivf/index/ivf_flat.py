@@ -1813,12 +1813,55 @@ class IndexIVFFlat(IndexBase):
                 offset += gsize
 
             if offset > 0:
+                merge_qids = merge_qids[:offset]
+                merge_scores = merge_scores[:offset]
+                merge_packed = merge_packed[:offset]
+                unique_q, inverse = torch.unique(merge_qids, return_inverse=True)
+                if unique_q.numel() == merge_qids.numel():
+                    block_scores = merge_scores
+                    block_packed = merge_packed
+                    block_qids = unique_q
+                else:
+                    counts = torch.bincount(inverse, minlength=unique_q.numel())
+                    max_count = int(counts.max().item())
+                    buf_scores = self._workspace.ensure(
+                        "csr_block_group_scores",
+                        (unique_q.numel(), max_count, k),
+                        dtype=self.dtype,
+                        device=device,
+                    )
+                    buf_scores.fill_(fill)
+                    buf_packed = self._workspace.ensure(
+                        "csr_block_group_packed",
+                        (unique_q.numel(), max_count, k),
+                        dtype=torch.long,
+                        device=device,
+                    )
+                    buf_packed.fill_(-1)
+
+                    order = torch.argsort(inverse)
+                    start = torch.cumsum(counts, dim=0) - counts
+                    row_pos_sorted = torch.arange(order.numel(), device=device) - torch.repeat_interleave(
+                        start, counts
+                    )
+                    row_pos = torch.empty_like(row_pos_sorted)
+                    row_pos[order] = row_pos_sorted
+
+                    buf_scores.index_put_((inverse, row_pos), merge_scores)
+                    buf_packed.index_put_((inverse, row_pos), merge_packed)
+
+                    flat_scores = buf_scores.view(unique_q.numel(), max_count * k)
+                    flat_packed = buf_packed.view(unique_q.numel(), max_count * k)
+                    block_scores, pos = torch.topk(flat_scores, k, largest=largest, dim=1)
+                    block_packed = torch.gather(flat_packed, 1, pos)
+                    block_qids = unique_q
+
                 self._merge_topk(
                     best_scores,
                     best_packed,
-                    merge_qids[:offset],
-                    merge_scores[:offset],
-                    merge_packed[:offset],
+                    block_qids,
+                    block_scores,
+                    block_packed,
                     k,
                     largest=largest,
                 )
