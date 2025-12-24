@@ -1348,6 +1348,14 @@ class IndexIVFFlat(IndexBase):
             )
             dists[start:end] = chunk_dists
             labels[start:end] = chunk_labels
+        if debug_stats is not None and debug_stats.get("blocked_pad_den"):
+            pad_den = float(debug_stats.get("blocked_pad_den", 0))
+            pad_num = float(debug_stats.get("blocked_pad_num", 0))
+            debug_stats["blocked_pad_ratio"] = pad_num / pad_den if pad_den > 0 else 0.0
+            blocks = float(debug_stats.get("blocked_blocks", 0))
+            if blocks > 0:
+                debug_stats["blocked_gmax_avg"] = float(debug_stats.get("blocked_gmax_sum", 0)) / blocks
+                debug_stats["blocked_lmax_avg"] = float(debug_stats.get("blocked_lmax_sum", 0)) / blocks
         return dists, labels
 
     def _search_csr_online_chunk(
@@ -1716,10 +1724,36 @@ class IndexIVFFlat(IndexBase):
                 query_ids_list.append(tasks_q[s:e])
                 offsets_list.append(a)
 
+            lens_buf = self._workspace.ensure(
+                "csr_block_lens", (bcount,), dtype=torch.long, device=device
+            )
+            gsize_buf = self._workspace.ensure(
+                "csr_block_gsizes", (bcount,), dtype=torch.long, device=device
+            )
+            offsets_buf = self._workspace.ensure(
+                "csr_block_offsets", (bcount,), dtype=torch.long, device=device
+            )
+            lens_cpu = torch.as_tensor(l_sizes, dtype=torch.long)
+            gsize_cpu = torch.as_tensor(g_sizes, dtype=torch.long)
+            offsets_cpu_tensor = torch.as_tensor(offsets_list, dtype=torch.long)
+            lens_buf[:bcount].copy_(lens_cpu)
+            gsize_buf[:bcount].copy_(gsize_cpu)
+            offsets_buf[:bcount].copy_(offsets_cpu_tensor)
+
             if debug_stats is not None:
                 debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
                 debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
                 debug_stats["list_blocks"] = int(debug_stats.get("list_blocks", 0)) + 1
+                debug_stats["blocked_blocks"] = int(debug_stats.get("blocked_blocks", 0)) + 1
+                debug_stats["blocked_lists"] = int(debug_stats.get("blocked_lists", 0)) + int(bcount)
+                debug_stats["blocked_pad_num"] = int(debug_stats.get("blocked_pad_num", 0)) + int(
+                    bcount * gmax * lmax
+                )
+                debug_stats["blocked_pad_den"] = int(debug_stats.get("blocked_pad_den", 0)) + int(
+                    sum(gs * ls for gs, ls in zip(g_sizes, l_sizes))
+                )
+                debug_stats["blocked_gmax_sum"] = int(debug_stats.get("blocked_gmax_sum", 0)) + int(gmax)
+                debug_stats["blocked_lmax_sum"] = int(debug_stats.get("blocked_lmax_sum", 0)) + int(lmax)
                 debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
                     sum(g_sizes)
                 )
@@ -1731,14 +1765,18 @@ class IndexIVFFlat(IndexBase):
             dist = q2_pad.unsqueeze(2) + x2_pad.unsqueeze(1) - (2.0 * prod)
             dist = dist.clamp_min_(0)
 
-            list_pos = torch.arange(lmax, device=device)
-            list_lens = torch.tensor(l_sizes, dtype=torch.long, device=device)
-            list_mask = list_pos.unsqueeze(0) >= list_lens.unsqueeze(1)
+            list_pos = self._workspace.ensure(
+                "csr_block_list_pos", (lmax,), dtype=torch.long, device=device
+            )
+            torch.arange(lmax, device=device, out=list_pos)
+            list_mask = list_pos.unsqueeze(0) >= lens_buf[:bcount].unsqueeze(1)
             dist.masked_fill_(list_mask.unsqueeze(1), float("inf"))
 
-            query_pos = torch.arange(gmax, device=device)
-            query_lens = torch.tensor(g_sizes, dtype=torch.long, device=device)
-            query_mask = query_pos.unsqueeze(0) >= query_lens.unsqueeze(1)
+            query_pos = self._workspace.ensure(
+                "csr_block_query_pos", (gmax,), dtype=torch.long, device=device
+            )
+            torch.arange(gmax, device=device, out=query_pos)
+            query_mask = query_pos.unsqueeze(0) >= gsize_buf[:bcount].unsqueeze(1)
             dist.masked_fill_(query_mask.unsqueeze(2), float("inf"))
 
             group_mask = list_pos.view(1, 1, lmax) >= sizes_pad.unsqueeze(2)
@@ -1746,40 +1784,81 @@ class IndexIVFFlat(IndexBase):
 
             topk = min(k, lmax)
             cand_scores, cand_j = torch.topk(dist, topk, largest=largest, dim=2)
-            offsets = torch.tensor(offsets_list, dtype=torch.long, device=device).view(bcount, 1, 1)
+            offsets = offsets_buf[:bcount].view(bcount, 1, 1)
             cand_packed = cand_j + offsets
 
-            for i in range(bcount):
-                gsize = g_sizes[i]
+            if topk < k:
+                pad_cols = k - topk
+                cand_scores = torch.cat(
+                    [
+                        cand_scores,
+                        torch.full((bcount, gmax, pad_cols), fill, dtype=self.dtype, device=device),
+                    ],
+                    dim=2,
+                )
+                cand_packed = torch.cat(
+                    [
+                        cand_packed,
+                        torch.full((bcount, gmax, pad_cols), -1, dtype=torch.long, device=device),
+                    ],
+                    dim=2,
+                )
+
+            qid_pad = self._workspace.ensure(
+                "csr_block_qids", (bcount, gmax), dtype=torch.long, device=device
+            )
+            qid_pad.fill_(-1)
+            for i, q_ids in enumerate(query_ids_list):
+                gsize = q_ids.shape[0]
                 if gsize <= 0:
                     continue
-                cand_scores_i = cand_scores[i, :gsize]
-                cand_packed_i = cand_packed[i, :gsize]
-                if topk < k:
-                    pad_cols = k - topk
-                    cand_scores_i = torch.cat(
-                        [
-                            cand_scores_i,
-                            torch.full((gsize, pad_cols), fill, dtype=self.dtype, device=device),
-                        ],
-                        dim=1,
-                    )
-                    cand_packed_i = torch.cat(
-                        [
-                            cand_packed_i,
-                            torch.full((gsize, pad_cols), -1, dtype=torch.long, device=device),
-                        ],
-                        dim=1,
-                    )
+                qid_pad[i, :gsize] = q_ids
+
+            list_row = self._workspace.ensure(
+                "csr_block_list_row", (bcount,), dtype=torch.long, device=device
+            )
+            torch.arange(bcount, device=device, out=list_row)
+            list_idx = list_row.view(-1, 1).expand(-1, gmax).reshape(-1)
+            q_flat = qid_pad.reshape(-1)
+            valid = q_flat >= 0
+            if valid.any():
+                block_buf_scores = self._workspace.ensure(
+                    "csr_block_buf_scores",
+                    (best_scores.shape[0], bcount, k),
+                    dtype=self.dtype,
+                    device=device,
+                )
+                block_buf_scores.fill_(fill)
+                block_buf_packed = self._workspace.ensure(
+                    "csr_block_buf_packed",
+                    (best_scores.shape[0], bcount, k),
+                    dtype=torch.long,
+                    device=device,
+                )
+                block_buf_packed.fill_(-1)
+                cand_scores_flat = cand_scores.reshape(-1, k)
+                cand_packed_flat = cand_packed.reshape(-1, k)
+                rows = q_flat[valid]
+                cols = list_idx[valid]
+                block_buf_scores.index_put_((rows, cols), cand_scores_flat[valid])
+                block_buf_packed.index_put_((rows, cols), cand_packed_flat[valid])
+
+                flat_scores = block_buf_scores.reshape(best_scores.shape[0], bcount * k)
+                flat_packed = block_buf_packed.reshape(best_scores.shape[0], bcount * k)
+                block_scores, pos = torch.topk(flat_scores, k, largest=largest, dim=1)
+                block_packed = torch.gather(flat_packed, 1, pos)
+                unique_q = torch.unique(rows)
                 self._merge_topk(
                     best_scores,
                     best_packed,
-                    query_ids_list[i],
-                    cand_scores_i,
-                    cand_packed_i.to(torch.long),
+                    unique_q,
+                    block_scores.index_select(0, unique_q),
+                    block_packed.index_select(0, unique_q),
                     k,
                     largest=largest,
                 )
+                if debug_stats is not None:
+                    debug_stats["blocked_merge_calls"] = int(debug_stats.get("blocked_merge_calls", 0)) + 1
         return True
 
     def _search_csr_buffered_chunk(
