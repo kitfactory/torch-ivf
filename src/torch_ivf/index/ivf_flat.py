@@ -193,6 +193,13 @@ class IndexIVFFlat(IndexBase):
     def last_search_stats(self) -> dict[str, float | int | str] | None:
         return self._last_search_stats
 
+    def to(self, device: torch.device | str | None) -> "IndexIVFFlat":
+        if device is None:
+            return self
+        cloned = super().to(device)
+        cloned._invalidate_search_cache()
+        return cloned
+
     # ------------------------------------------------------------------ #
     # Core API
     # ------------------------------------------------------------------ #
@@ -1368,7 +1375,8 @@ class IndexIVFFlat(IndexBase):
             query_counts = self._estimate_candidates_per_query(
                 top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
             )
-            max_candidates = int(query_counts.max().item()) if query_counts.numel() else 0
+            query_counts_cpu = query_counts.to("cpu")
+            max_candidates = int(query_counts_cpu.max().item()) if query_counts_cpu.numel() else 0
             if max_candidates > 0 and (chunk_size * max_candidates) <= self._candidate_budget():
                 pos_1d = torch.arange(max_candidates, dtype=torch.long, device=self.device)
                 index_matrix, query_counts = self._build_candidate_index_matrix_from_lists(
@@ -2290,7 +2298,4 @@ class IndexIVFFlat(IndexBase):
             "_packed_norms",
             "_list_ids",
             "_list_offsets",
-            "_centroids_t",
-            "_centroid_norm2",
-            "_list_sizes",
         )

@@ -167,6 +167,29 @@ def test_ivf_search_cache_invalidated_on_add_and_max_codes():
     assert index._effective_max_codes_cache is None
 
 
+def test_ivf_to_invalidates_search_cache():
+    xb, xq = _toy_data(d=8, nb=64, nq=4, seed=11)
+    index = IndexIVFFlat(8, nlist=8)
+    index.train(xb)
+    index.add(xb)
+    index.search_mode = "csr"
+    index.max_codes = 10
+    index.search(xq, k=3)
+
+    assert index._centroids_t is not None
+    assert index._centroid_norm2 is not None
+    assert index._list_sizes is not None
+    assert index._list_sizes_cpu is not None
+    assert index._effective_max_codes_cache is not None
+
+    moved = index.to(index.device)
+    assert moved._centroids_t is None
+    assert moved._centroid_norm2 is None
+    assert moved._list_sizes is None
+    assert moved._list_sizes_cpu is None
+    assert moved._effective_max_codes_cache is None
+
+
 def test_ivf_workspace_reuse_does_not_change_results():
     xb, xq = _toy_data(d=16, nb=128, nq=8, seed=6)
     index = IndexIVFFlat(16, nlist=32, nprobe=8)
