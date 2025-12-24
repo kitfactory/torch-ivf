@@ -22,7 +22,7 @@
 
 ## Next（現在のフォーカス）
 - [ ] candidate_budget sweep（max_codes 畳み込み）で recall/QPS の閾値を確定
-- [ ] CSR-large v2（list-block batching）で起動回数を削減
+- [x] CSR-large v2（list-block batching）で起動回数を削減
 - [ ] per-list cap（use_per_list_sizes）を CSR-large v2 と組み合わせて本命経路にする
 
 ## Now（次に潰す：優先順）

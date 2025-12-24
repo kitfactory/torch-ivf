@@ -1441,6 +1441,25 @@ class IndexIVFFlat(IndexBase):
             )
             debug_stats["list_groups"] = int(debug_stats.get("list_groups", 0)) + int(groups.shape[0])
         groups_cpu = self._csr_groups_cpu(groups, task_sizes)
+        if (
+            per_list_sizes is not None
+            and self.metric == "l2"
+            and self._search_csr_blocked_groups(
+                q_tasks,
+                q2_tasks,
+                tasks_q,
+                task_sizes,
+                groups_cpu,
+                k,
+                best_scores=best_scores,
+                best_packed=best_packed,
+                fill=fill,
+                debug_stats=debug_stats,
+            )
+        ):
+            out_ids = self._list_ids.index_select(0, best_packed.clamp_min(0).reshape(-1)).reshape(best_packed.shape)
+            out_ids = torch.where(best_packed < 0, torch.full_like(out_ids, -1), out_ids)
+            return best_scores, out_ids
         for l, start, end, max_len in groups_cpu:
             a = int(self._list_offsets_cpu[int(l)])
             b = int(self._list_offsets_cpu[int(l) + 1])
@@ -1567,6 +1586,201 @@ class IndexIVFFlat(IndexBase):
         out_ids = self._list_ids.index_select(0, best_packed.clamp_min(0).reshape(-1)).reshape(best_packed.shape)
         out_ids = torch.where(best_packed < 0, torch.full_like(out_ids, -1), out_ids)
         return best_scores, out_ids
+
+    def _search_csr_blocked_groups(
+        self,
+        q_tasks: torch.Tensor,
+        q2_tasks: torch.Tensor | None,
+        tasks_q: torch.Tensor,
+        task_sizes: torch.Tensor | None,
+        groups_cpu: list[list[int]],
+        k: int,
+        *,
+        best_scores: torch.Tensor,
+        best_packed: torch.Tensor,
+        fill: float,
+        debug_stats: dict[str, float | int | str] | None,
+    ) -> bool:
+        if q2_tasks is None or task_sizes is None:
+            return False
+        block_size = self._csr_list_block_size()
+        if block_size <= 1 or not groups_cpu:
+            return False
+
+        vec_chunk = self._csr_vec_chunk(buffered=False)
+        offsets_cpu = (
+            self._list_offsets_cpu
+            if len(self._list_offsets_cpu) == self._nlist + 1
+            else self._list_offsets.to("cpu").tolist()
+        )
+        device = self.device
+        d = self.d
+        largest = self.metric == "ip"
+        group_entries: list[tuple[int, int, int, int, int, int, int]] = []
+        for l, start, end, max_len in groups_cpu:
+            s = int(start)
+            e = int(end)
+            if e <= s:
+                continue
+            list_id = int(l)
+            a = int(offsets_cpu[list_id])
+            b = int(offsets_cpu[list_id + 1])
+            if b <= a:
+                continue
+            gsize = e - s
+            if gsize <= 0:
+                continue
+            list_len = b - a
+            if max_len > 0 and max_len < list_len:
+                list_len = int(max_len)
+                b = a + list_len
+            if list_len <= 0:
+                continue
+            if list_len > vec_chunk:
+                return False
+            group_entries.append((gsize, list_len, list_id, s, e, a, b))
+
+        if not group_entries:
+            return False
+
+        group_entries.sort(key=lambda v: (v[0], v[1]))
+
+        candidate_sizes = [block_size]
+        if block_size > 2:
+            candidate_sizes.append(block_size // 2)
+        chosen_block = 1
+        for size in candidate_sizes:
+            if size <= 1:
+                continue
+            ok = True
+            for i in range(0, len(group_entries), size):
+                block = group_entries[i : i + size]
+                g_sizes = [info[0] for info in block]
+                l_sizes = [info[1] for info in block]
+                gmax = max(g_sizes)
+                lmax = max(l_sizes)
+                cost_block = len(block) * gmax * lmax
+                cost_list = sum(gs * ls for gs, ls in zip(g_sizes, l_sizes))
+                if cost_list <= 0:
+                    continue
+                if cost_block > cost_list * 2:
+                    ok = False
+                    break
+            if ok:
+                chosen_block = size
+                break
+
+        if chosen_block <= 1:
+            if debug_stats is not None:
+                debug_stats["list_block_size"] = int(chosen_block)
+            return False
+
+        if debug_stats is not None:
+            debug_stats["list_block_size"] = int(chosen_block)
+
+        for block_start in range(0, len(group_entries), chosen_block):
+            block = group_entries[block_start : block_start + chosen_block]
+            g_sizes = [info[0] for info in block]
+            l_sizes = [info[1] for info in block]
+            gmax = max(g_sizes)
+            lmax = max(l_sizes)
+            bcount = len(block)
+
+            q_pad = self._workspace.ensure(
+                "csr_block_q", (bcount, gmax, d), dtype=self.dtype, device=device
+            )
+            q2_pad = self._workspace.ensure(
+                "csr_block_q2", (bcount, gmax), dtype=self.dtype, device=device
+            )
+            x_pad = self._workspace.ensure(
+                "csr_block_x", (bcount, lmax, d), dtype=self.dtype, device=device
+            )
+            x2_pad = self._workspace.ensure(
+                "csr_block_x2", (bcount, lmax), dtype=self.dtype, device=device
+            )
+            sizes_pad = self._workspace.ensure(
+                "csr_block_sizes", (bcount, gmax), dtype=torch.long, device=device
+            )
+            sizes_pad.zero_()
+
+            query_ids_list: list[torch.Tensor] = []
+            offsets_list: list[int] = []
+            for i, (gsize, list_len, list_id, s, e, a, b) in enumerate(block):
+                q_slice = q_tasks[s:e]
+                q_pad[i, :gsize] = q_slice
+                q2_pad[i, :gsize] = q2_tasks[s:e]
+                x_slice = self._packed_embeddings[a:b]
+                x_pad[i, :list_len] = x_slice
+                x2_pad[i, :list_len] = self._packed_norms[a:b]
+                sizes_pad[i, :gsize] = task_sizes[s:e]
+                query_ids_list.append(tasks_q[s:e])
+                offsets_list.append(a)
+
+            if debug_stats is not None:
+                debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
+                debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
+                debug_stats["list_blocks"] = int(debug_stats.get("list_blocks", 0)) + 1
+                debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
+                    sum(g_sizes)
+                )
+                debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
+                    sum(l_sizes)
+                )
+
+            prod = torch.bmm(q_pad, x_pad.transpose(1, 2))
+            dist = q2_pad.unsqueeze(2) + x2_pad.unsqueeze(1) - (2.0 * prod)
+            dist = dist.clamp_min_(0)
+
+            list_pos = torch.arange(lmax, device=device)
+            list_lens = torch.tensor(l_sizes, dtype=torch.long, device=device)
+            list_mask = list_pos.unsqueeze(0) >= list_lens.unsqueeze(1)
+            dist.masked_fill_(list_mask.unsqueeze(1), float("inf"))
+
+            query_pos = torch.arange(gmax, device=device)
+            query_lens = torch.tensor(g_sizes, dtype=torch.long, device=device)
+            query_mask = query_pos.unsqueeze(0) >= query_lens.unsqueeze(1)
+            dist.masked_fill_(query_mask.unsqueeze(2), float("inf"))
+
+            group_mask = list_pos.view(1, 1, lmax) >= sizes_pad.unsqueeze(2)
+            dist.masked_fill_(group_mask, float("inf"))
+
+            topk = min(k, lmax)
+            cand_scores, cand_j = torch.topk(dist, topk, largest=largest, dim=2)
+            offsets = torch.tensor(offsets_list, dtype=torch.long, device=device).view(bcount, 1, 1)
+            cand_packed = cand_j + offsets
+
+            for i in range(bcount):
+                gsize = g_sizes[i]
+                if gsize <= 0:
+                    continue
+                cand_scores_i = cand_scores[i, :gsize]
+                cand_packed_i = cand_packed[i, :gsize]
+                if topk < k:
+                    pad_cols = k - topk
+                    cand_scores_i = torch.cat(
+                        [
+                            cand_scores_i,
+                            torch.full((gsize, pad_cols), fill, dtype=self.dtype, device=device),
+                        ],
+                        dim=1,
+                    )
+                    cand_packed_i = torch.cat(
+                        [
+                            cand_packed_i,
+                            torch.full((gsize, pad_cols), -1, dtype=torch.long, device=device),
+                        ],
+                        dim=1,
+                    )
+                self._merge_topk(
+                    best_scores,
+                    best_packed,
+                    query_ids_list[i],
+                    cand_scores_i,
+                    cand_packed_i.to(torch.long),
+                    k,
+                    largest=largest,
+                )
+        return True
 
     def _search_csr_buffered_chunk(
         self,
@@ -1774,6 +1988,11 @@ class IndexIVFFlat(IndexBase):
         out_ids = self._list_ids.index_select(0, best_packed.clamp_min(0).reshape(-1)).reshape(best_packed.shape)
         out_ids = torch.where(best_packed < 0, torch.full_like(out_ids, -1), out_ids)
         return best_scores, out_ids
+
+    def _csr_list_block_size(self) -> int:
+        if self.device.type == "cpu":
+            return 1
+        return 4
 
     def _csr_task_budget(self) -> int:
         if self.device.type == "cpu":
