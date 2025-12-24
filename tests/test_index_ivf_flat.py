@@ -298,6 +298,7 @@ def test_ivf_csr_blocked_groups_matches_unblocked():
     def run(block_size: int):
         index._csr_list_block_size = lambda: block_size
         index._csr_block_pad_ratio_limit = lambda: 10.0
+        index._csr_block_cost_ratio_limit = lambda: 100.0
         index._csr_block_max_elements = lambda: 1_000_000_000
         dists, ids = index.search(xq, k=5, params=params)
         stats = index.last_search_stats

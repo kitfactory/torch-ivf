@@ -1616,6 +1616,7 @@ class IndexIVFFlat(IndexBase):
             return False
         pad_ratio_limit = float(self._csr_block_pad_ratio_limit())
         max_block_elements = int(self._csr_block_max_elements())
+        cost_ratio_limit = float(self._csr_block_cost_ratio_limit())
 
         vec_chunk = self._csr_vec_chunk(buffered=False)
         offsets_cpu = (
@@ -1677,8 +1678,7 @@ class IndexIVFFlat(IndexBase):
                 if max_block_elements > 0 and cost_block > max_block_elements:
                     ok = False
                     break
-                pad_ratio = cost_block / cost_list
-                if pad_ratio > pad_ratio_limit:
+                if cost_block > cost_list * cost_ratio_limit:
                     ok = False
                     break
             if ok:
@@ -1756,6 +1756,7 @@ class IndexIVFFlat(IndexBase):
                 prev_ratio = float(debug_stats.get("blocked_pad_ratio_max", 0.0))
                 if pad_ratio > prev_ratio:
                     debug_stats["blocked_pad_ratio_max"] = float(pad_ratio)
+                debug_stats["blocked_used_blocks"] = int(debug_stats.get("blocked_used_blocks", 0)) + 1
                 debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
                 debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
                 debug_stats["list_blocks"] = int(debug_stats.get("list_blocks", 0)) + 1
@@ -2035,6 +2036,11 @@ class IndexIVFFlat(IndexBase):
         if self.device.type == "cpu":
             return 1.0
         return 1.15
+
+    def _csr_block_cost_ratio_limit(self) -> float:
+        if self.device.type == "cpu":
+            return 1.0
+        return 2.0
 
     def _csr_block_max_elements(self) -> int:
         elem_size = torch.tensor([], dtype=self.dtype).element_size()
