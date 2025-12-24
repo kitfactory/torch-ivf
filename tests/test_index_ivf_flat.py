@@ -273,7 +273,7 @@ def test_rebuild_lists_residual_norm_orders_within_list():
 
 def test_ivf_csr_blocked_groups_matches_unblocked():
     if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for blocked CSR test.")
+        pytest.skip("CUDA/ROCm device is required for blocked CSR test.")
     d = 32
     xb, xq = _toy_data(d=d, nb=1024, nq=512, seed=7)
     device = torch.device("cuda")
