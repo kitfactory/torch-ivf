@@ -41,6 +41,7 @@ class CandidateBudgetSweepResult:
     min_codes_per_list: int
     max_codes_cap_per_list: int
     strict_budget: bool
+    use_per_list_sizes: bool
     topk: int
     dtype: str
     warmup: int
@@ -93,6 +94,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-codes-per-list", type=int, default=0)
     p.add_argument("--max-codes-cap-per-list", type=int, default=0)
     p.add_argument("--strict-budget", action="store_true")
+    p.add_argument(
+        "--budget-mode",
+        choices=["max_codes", "per_list"],
+        default="max_codes",
+        help="budget interpretation (max_codes=prefix total, per_list=per-list cap)",
+    )
     p.add_argument("--torch-device", default="cuda", help="torch device string (default: cuda)")
     p.add_argument("--torch-search-mode", choices=["matrix", "csr", "auto"], default="csr")
     p.add_argument("--jsonl", default="benchmarks/benchmarks.jsonl", help="append results to this JSONL file")
@@ -224,6 +231,10 @@ def main() -> None:
 
     records: list[CandidateBudgetSweepResult] = []
     list_ordering = None if args.list_ordering == "none" else args.list_ordering
+    use_per_list_sizes = args.budget_mode == "per_list"
+    if not use_per_list_sizes:
+        if args.dynamic_nprobe or args.min_codes_per_list > 0 or args.max_codes_cap_per_list > 0 or args.strict_budget:
+            raise ValueError("per-list options require --budget-mode per_list.")
 
     for budget in candidate_budgets:
         params = SearchParams(
@@ -239,6 +250,7 @@ def main() -> None:
             min_codes_per_list=args.min_codes_per_list,
             max_codes_cap_per_list=args.max_codes_cap_per_list,
             strict_budget=args.strict_budget,
+            use_per_list_sizes=use_per_list_sizes,
         )
         search_ms, search_ms_min, labels = _time_torch_search(
             index, xq, args.topk, warmup=warmup, repeat=repeat, params=params
@@ -268,6 +280,7 @@ def main() -> None:
                 min_codes_per_list=int(args.min_codes_per_list),
                 max_codes_cap_per_list=int(args.max_codes_cap_per_list),
                 strict_budget=bool(args.strict_budget),
+                use_per_list_sizes=bool(use_per_list_sizes),
                 topk=args.topk,
                 dtype=args.dtype,
                 warmup=warmup,
