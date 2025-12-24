@@ -61,6 +61,39 @@ If you report QPS with these, include the exact params alongside the numbers.
 - `max_codes` (e.g. `32768`) to cap candidates per query.
 - `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")` (L2 only).
 
+### Approximation presets (per-list budgets)
+
+`SearchParams.profile` supports preset profiles that enable approximate search with per-list candidate budgets:
+
+- `approx_fast`: `candidate_budget=32768`, `use_per_list_sizes=True`
+- `approx_balanced`: `candidate_budget=65536`, `use_per_list_sizes=True`
+- `approx_quality`: `candidate_budget=131072`, `use_per_list_sizes=True` (aims for recall≈0.995 vs unlimited on the benchmark below)
+
+Example:
+
+```python
+from torch_ivf.index import SearchParams
+
+params = SearchParams(profile="approx_quality")
+scores, ids = index.search(xq, k=20, params=params)
+
+# You can still override explicitly:
+params = SearchParams(profile="approx_quality", candidate_budget=98304)
+```
+
+### Approximation preset results (per-list, csr)
+
+> Same environment as the table above. `seed=1234`, `search_mode=csr`.
+
+| candidate_budget | QPS | recall@k vs unlimited |
+|---:|---:|---:|
+| 32,768 | 54.9k | 0.930242 |
+| 65,536 | 51.9k | 0.976895 |
+| 98,304 | 53.8k | 0.990066 |
+| 131,072 | 50.8k | 0.995046 |
+
+Note: 98,304 (~96k) reaches ~0.99 recall but does not meet the 0.995 gate.
+
 ### Add performance (batch size sweep)
 
 > Updated: `2025-12-21T13:28:06` (`scripts/benchmark.py`, `add_ms` is elapsed time for one add)

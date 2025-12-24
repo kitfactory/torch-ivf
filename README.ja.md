@@ -61,6 +61,40 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 - `max_codes`（例: `32768`）で候補数の上限を設定する。
 - `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")`（L2のみ）。
 
+
+### ????????per-list ???
+
+`SearchParams.profile` ????????per-list ???????????????
+
+- `approx_fast`: `candidate_budget=32768`, `use_per_list_sizes=True`
+- `approx_balanced`: `candidate_budget=65536`, `use_per_list_sizes=True`
+- `approx_quality`: `candidate_budget=131072`, `use_per_list_sizes=True`??????? recall?0.995?
+
+?:
+
+```python
+from torch_ivf.index import SearchParams
+
+params = SearchParams(profile="approx_quality")
+scores, ids = index.search(xq, k=20, params=params)
+
+# ????????????????:
+params = SearchParams(profile="approx_quality", candidate_budget=98304)
+```
+
+### ???????????per-list, csr?
+
+> ?????????`seed=1234`, `search_mode=csr`?
+
+| candidate_budget | QPS | recall@k?unlimited ?? |
+|---:|---:|---:|
+| 32,768 | 54.9k | 0.930242 |
+| 65,536 | 51.9k | 0.976895 |
+| 98,304 | 53.8k | 0.990066 |
+| 131,072 | 50.8k | 0.995046 |
+
+??: 98,304??96k?? recall?0.99 ????0.995 ????????????
+
 ### グラフ：QPS vs nq（tiny-batch → throughput）
 
 赤: torch-ivf（ROCm GPU, csr） / 黒: faiss-cpu（CPU）
