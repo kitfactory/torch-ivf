@@ -1787,78 +1787,47 @@ class IndexIVFFlat(IndexBase):
             offsets = offsets_buf[:bcount].view(bcount, 1, 1)
             cand_packed = cand_j + offsets
 
-            if topk < k:
-                pad_cols = k - topk
-                cand_scores = torch.cat(
-                    [
-                        cand_scores,
-                        torch.full((bcount, gmax, pad_cols), fill, dtype=self.dtype, device=device),
-                    ],
-                    dim=2,
-                )
-                cand_packed = torch.cat(
-                    [
-                        cand_packed,
-                        torch.full((bcount, gmax, pad_cols), -1, dtype=torch.long, device=device),
-                    ],
-                    dim=2,
-                )
-
-            qid_pad = self._workspace.ensure(
-                "csr_block_qids", (bcount, gmax), dtype=torch.long, device=device
+            rows = int(sum(g_sizes))
+            if rows <= 0:
+                continue
+            merge_scores = self._workspace.ensure(
+                "csr_block_merge_scores", (rows, k), dtype=self.dtype, device=device
             )
-            qid_pad.fill_(-1)
+            merge_scores.fill_(fill)
+            merge_packed = self._workspace.ensure(
+                "csr_block_merge_packed", (rows, k), dtype=torch.long, device=device
+            )
+            merge_packed.fill_(-1)
+            merge_qids = self._workspace.ensure(
+                "csr_block_merge_qids", (rows,), dtype=torch.long, device=device
+            )
+
+            offset = 0
             for i, q_ids in enumerate(query_ids_list):
-                gsize = q_ids.shape[0]
+                gsize = int(q_ids.numel())
                 if gsize <= 0:
                     continue
-                qid_pad[i, :gsize] = q_ids
+                merge_qids[offset : offset + gsize] = q_ids
+                merge_scores[offset : offset + gsize, :topk] = cand_scores[i, :gsize]
+                merge_packed[offset : offset + gsize, :topk] = cand_packed[i, :gsize]
+                offset += gsize
 
-            list_row = self._workspace.ensure(
-                "csr_block_list_row", (bcount,), dtype=torch.long, device=device
-            )
-            torch.arange(bcount, device=device, out=list_row)
-            list_idx = list_row.view(-1, 1).expand(-1, gmax).reshape(-1)
-            q_flat = qid_pad.reshape(-1)
-            valid = q_flat >= 0
-            if valid.any():
-                block_buf_scores = self._workspace.ensure(
-                    "csr_block_buf_scores",
-                    (best_scores.shape[0], bcount, k),
-                    dtype=self.dtype,
-                    device=device,
-                )
-                block_buf_scores.fill_(fill)
-                block_buf_packed = self._workspace.ensure(
-                    "csr_block_buf_packed",
-                    (best_scores.shape[0], bcount, k),
-                    dtype=torch.long,
-                    device=device,
-                )
-                block_buf_packed.fill_(-1)
-                cand_scores_flat = cand_scores.reshape(-1, k)
-                cand_packed_flat = cand_packed.reshape(-1, k)
-                rows = q_flat[valid]
-                cols = list_idx[valid]
-                block_buf_scores.index_put_((rows, cols), cand_scores_flat[valid])
-                block_buf_packed.index_put_((rows, cols), cand_packed_flat[valid])
-
-                flat_scores = block_buf_scores.reshape(best_scores.shape[0], bcount * k)
-                flat_packed = block_buf_packed.reshape(best_scores.shape[0], bcount * k)
-                block_scores, pos = torch.topk(flat_scores, k, largest=largest, dim=1)
-                block_packed = torch.gather(flat_packed, 1, pos)
-                unique_q = torch.unique(rows)
+            if offset > 0:
                 self._merge_topk(
                     best_scores,
                     best_packed,
-                    unique_q,
-                    block_scores.index_select(0, unique_q),
-                    block_packed.index_select(0, unique_q),
+                    merge_qids[:offset],
+                    merge_scores[:offset],
+                    merge_packed[:offset],
                     k,
                     largest=largest,
                 )
                 if debug_stats is not None:
                     debug_stats["blocked_merge_calls"] = int(debug_stats.get("blocked_merge_calls", 0)) + 1
+                    debug_stats["blocked_pack_rows"] = int(debug_stats.get("blocked_pack_rows", 0)) + int(offset)
+                    debug_stats["blocked_pack_elems"] = int(debug_stats.get("blocked_pack_elems", 0)) + int(
+                        offset * k
+                    )
         return True
 
     def _search_csr_buffered_chunk(
