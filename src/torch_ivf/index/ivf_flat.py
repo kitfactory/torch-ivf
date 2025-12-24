@@ -12,7 +12,14 @@ from .base import IndexBase, MetricType
 
 @dataclass(frozen=True)
 class SearchParams:
-    profile: Literal["exact", "speed", "approx"] = "speed"
+    profile: Literal[
+        "exact",
+        "speed",
+        "approx",
+        "approx_fast",
+        "approx_balanced",
+        "approx_quality",
+    ] = "speed"
     safe_pruning: bool = True
     approximate: bool = False
     nprobe: int | None = None
@@ -559,8 +566,23 @@ class IndexIVFFlat(IndexBase):
             use_per_list_sizes = bool(params.use_per_list_sizes)
             debug_stats = bool(params.debug_stats)
 
-        if profile not in {"exact", "speed", "approx"}:
-            raise ValueError("profile must be 'exact', 'speed', or 'approx'.")
+        preset_budgets = {
+            "approx_fast": 32_768,
+            "approx_balanced": 65_536,
+            "approx_quality": 131_072,
+        }
+        if profile in preset_budgets:
+            approximate = True
+            if candidate_budget is None:
+                candidate_budget = preset_budgets[profile]
+            use_per_list_sizes = True
+
+        valid_profiles = {"exact", "speed", "approx"} | preset_budgets.keys()
+        if profile not in valid_profiles:
+            raise ValueError(
+                "profile must be one of 'exact', 'speed', 'approx', 'approx_fast', 'approx_balanced', "
+                "or 'approx_quality'."
+            )
         if nprobe <= 0:
             raise ValueError("nprobe must be >= 1.")
         if max_codes < 0:

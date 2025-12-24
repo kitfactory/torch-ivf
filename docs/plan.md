@@ -19,6 +19,8 @@
 - [x] CSR 経路の同期削減（hot ループ内の .item() 排除）
 - [x] CSR ワークスペースの再利用徹底
 - [x] candidate_budget の max_codes 畳み込み経路＋debug_stats 拡充
+- [x] per_list 96k（98304）の追加測定
+- [x] 近似プリセット（fast/balanced/quality）の確定
 
 ## Next（現在のフォーカス）
 - [ ] candidate_budget sweep（max_codes 畳み込み）で recall/QPS の閾値を確定

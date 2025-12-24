@@ -223,6 +223,16 @@ def test_search_params_resolve_clamps_nprobe_and_prefers_explicit():
     assert config.candidate_budget == 16
 
 
+def test_search_params_profile_presets_apply_per_list_budget():
+    index = IndexIVFFlat(2, nlist=4, nprobe=2)
+    params = SearchParams(profile="approx_quality")
+    config = index._resolve_search_params(params)
+    assert config.approximate is True
+    assert config.use_per_list_sizes is True
+    assert config.candidate_budget == 131072
+    assert config.list_ordering == "residual_norm_asc"
+
+
 def test_candidate_budget_dynamic_nprobe_skips_far_lists():
     index = IndexIVFFlat(2, nlist=4)
     offsets = torch.tensor([0, 10, 20, 30, 40], dtype=torch.long, device=index.device)

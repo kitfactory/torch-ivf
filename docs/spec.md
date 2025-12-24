@@ -465,10 +465,10 @@ def search_ivf_csr(
 ### 12.7 SearchParams / profile（Spec ID: PERF-6c）
 - 前提: `IndexIVFFlat.search` は既存呼び出しとの互換性を維持する。
 - 条件: `search(xq, k, *, params: Optional[SearchParams] = None)` を呼び出す。
-- 振る舞い: `params is None` の場合は `profile="speed"` 相当として扱う。`profile="exact"` は PERF-6a/6b を無効化し、`profile="speed"` は PERF-6a を有効化し PERF-6b を無効化する。`profile="approx"` は PERF-6a と PERF-6b を有効化する。`params` の明示的な値は profile の既定より優先する。
+- 振る舞い: `params is None` の場合は `profile="speed"` 相当として扱う。`profile="exact"` は PERF-6a/6b を無効化し、`profile="speed"` は PERF-6a を有効化し PERF-6b を無効化する。`profile="approx"` は PERF-6a と PERF-6b を有効化する。`profile="approx_fast" / "approx_balanced" / "approx_quality"` は近似プリセットを有効化し、`candidate_budget` と `use_per_list_sizes` の既定を上書きする。`params` の明示的な値は profile の既定より優先する。
 - 補足: `profile="exact"` は「近似を行わない」を意味し、結果不変の最適化（キャッシュ/ワークスペース/安全剪定）は許容する。
 - SearchParams の構成（後方互換）:
-  - `profile: Literal["exact","speed","approx"] = "speed"`
+  - `profile: Literal["exact","speed","approx","approx_fast","approx_balanced","approx_quality"] = "speed"`
   - `safe_pruning: bool = True`（L2 のみ有効）
   - `approximate: bool = False`
   - `nprobe: Optional[int] = None`
@@ -486,6 +486,7 @@ def search_ivf_csr(
 - `debug_stats: bool = False`
 - `debug_stats=True` ???????????? `IndexIVFFlat.last_search_stats` ??????
 - 解決順序: `profile` は既定値テンプレとして使い、`IndexIVFFlat` の設定を上書きしない。明示的な SearchParams の値は `IndexIVFFlat` の設定より常に優先する。
+- 近似プリセット: `profile="approx_fast"` は `candidate_budget=32768`、`profile="approx_balanced"` は `candidate_budget=65536`、`profile="approx_quality"` は `candidate_budget=131072` を既定とし、`use_per_list_sizes=True` を適用する。`candidate_budget` は per-list cap として解釈する。
 - 入力バリデーション: `nprobe` は 1 以上、`max_codes` は 0 以上でなければならない。`candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。`nprobe > nlist` の場合は `nprobe_eff = nlist` に clamp する。
 
 ### 12.8 速度優先デフォルトON（結果不変）（Spec ID: PERF-6a）
