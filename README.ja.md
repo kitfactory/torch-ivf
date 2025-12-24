@@ -1,10 +1,10 @@
-# torch-ivf（日本語）
+﻿# torch-ivf（日本語）
 
 **Faiss ライクに使える、PyTorch ネイティブ IVF。**  
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
 
 - 🔁 **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
-- 📈 **throughput 領域で faiss-cpu を最大 5.07x**（`nq=19600` で 46,093 / 9,089 ≒ 5.07x）
+- 📈 **throughput 領域で faiss-cpu を最大 5.20x**（`nq=19600` で 50,709 / 9,758 ≒ 5.20x）
 - 🧩 **PyTorch の backend が動けば同じコードで動く**（CPU/CUDA/ROCm/DirectML。*One codebase across backends*）
 - 🧪 **実測・再現手順あり**（env/jsonl + scripts 同梱。*Reproducible benchmarks included*）
 
@@ -45,16 +45,16 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > 実行環境: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
-> 更新日時: `2025-12-21T15:31:06`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
+> 更新日時: `2025-12-24T18:08:10`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
 >
-> ※この表は throughput 領域を見せるため `search_mode=csr` 固定です。通常利用は `search_mode=auto` 推奨です。
+> ※この表は **`search_mode=auto` 固定**です（auto は tiny-batch では軽い経路、throughput では `csr` を選択）。最大 throughput を見たい場合は `search_mode=csr` を指定してください。
 > faiss-cpu は既定スレッド設定（環境依存）です。再現する場合は `OMP_NUM_THREADS` を固定してください（例: Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`）。
 
-| nq | torch-ivf（ROCm GPU, csr） | faiss-cpu（CPU） |
+| nq | torch-ivf（ROCm GPU, auto） | faiss-cpu（CPU） |
 |---:|---:|---:|
-| 512 | **14,248 QPS** | 6,273 QPS |
-| 2,048 | **32,058 QPS** | 9,220 QPS |
-| 19,600 | **46,093 QPS** | 9,089 QPS |
+| 512 | **20,017 QPS** | 6,271 QPS |
+| 2,048 | **36,344 QPS** | 10,000 QPS |
+| 19,600 | **50,709 QPS** | 9,758 QPS |
 
 **速度優先パラメータ（任意・recall低下の可能性あり）**  
 これらの条件でQPSを記載する場合は、パラメータも併記してください。
@@ -99,7 +99,7 @@ params = SearchParams(profile="approx_quality", candidate_budget=98304)
 
 ### グラフ：QPS vs nq（tiny-batch → throughput）
 
-赤: torch-ivf（ROCm GPU, csr） / 黒: faiss-cpu（CPU）
+赤: torch-ivf（ROCm GPU, auto） / 黒: faiss-cpu（CPU）
 
 ![QPS vs nq](docs/assets/qps_vs_nq.svg)
 
@@ -278,3 +278,4 @@ uv run pytest
 - [`docs/plan.md`](docs/plan.md) – 進捗チェックリスト
 - [`docs/tutorial.ja.md`](docs/tutorial.ja.md) – チュートリアル（日本語）
 - [`docs/tutorial.en.md`](docs/tutorial.en.md) – Tutorial (English)
+

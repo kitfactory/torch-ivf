@@ -45,16 +45,16 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 
 > Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > Environment: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
-> Updated: `2025-12-21T15:31:06` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
+> Updated: `2025-12-24T18:08:10` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
 >
-> Note: this table is **fixed to `search_mode=csr`** to highlight the throughput regime. For normal usage, `search_mode=auto` is recommended.
+> Note: this table is **fixed to `search_mode=auto`** to show the recommended default (auto picks a lighter path for tiny batches and `csr` for throughput). For maximum throughput, set `search_mode=csr`.
 > faiss-cpu uses the default thread settings (environment-dependent). For reproducibility, fix `OMP_NUM_THREADS` (e.g. Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`).
 
-| nq | torch-ivf (ROCm GPU, csr) | faiss-cpu (CPU) |
+| nq | torch-ivf (ROCm GPU, auto) | faiss-cpu (CPU) |
 |---:|---:|---:|
-| 512 | **14,248 QPS** | 6,273 QPS |
-| 2,048 | **32,058 QPS** | 9,220 QPS |
-| 19,600 | **46,093 QPS** | 9,089 QPS |
+| 512 | **20,017 QPS** | 6,271 QPS |
+| 2,048 | **36,344 QPS** | 10,000 QPS |
+| 19,600 | **50,709 QPS** | 9,758 QPS |
 
 **Speed-leaning params (optional; recall trade-off)**  
 If you report QPS with these, include the exact params alongside the numbers.
