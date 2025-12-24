@@ -516,15 +516,16 @@ def search_ivf_csr(
   - `nprobe_user` は `params.nprobe` があればそれを用い、無ければ `IndexIVFFlat.nprobe` を用いる。
   - `max_codes_user` は `params.max_codes` があればそれを用い、無ければ `IndexIVFFlat.max_codes` を用いる。
   - Exact（`approximate=False`）: `max_codes_eff = max_codes_user`, `nprobe_eff = nprobe_user`。
-  - Approx（`approximate=True`）: `nprobe_eff = nprobe_user`（`dynamic_nprobe=True` の場合でも上限は `nprobe_user`。減少のみ許可）。`candidate_budget` が指定される場合は `max_codes_from_budget = ceil(candidate_budget / nprobe_eff)` を求め、`max_codes_eff = min_positive(max_codes_user, max_codes_from_budget)` とする。
-    - `use_per_list_sizes=False` の場合は `max_codes` prefix 経路でスキャン量を削減する（比較用途。budget が小さいと recall が早期に崩れることがある）。
-    - `use_per_list_sizes=True` の場合は per-list cap を優先し、list 数は維持する（起動回数削減は CSR-large v2 とセットで解消する）。
+  - Approx（`approximate=True`）: `nprobe_eff = nprobe_user`（`dynamic_nprobe=True` の場合でも上限は `nprobe_user`。減少のみ許可）。`candidate_budget` が指定される場合は `use_per_list_sizes` により解釈を分ける。
+    - `use_per_list_sizes=False` の場合は `max_codes_from_budget = candidate_budget` とし、`max_codes_eff = min_positive(max_codes_user, max_codes_from_budget)` を用いる（prefix total の比較用途）。
+    - `use_per_list_sizes=True` の場合は `per_list_cap = ceil(candidate_budget / nprobe_eff)` とし、`max_codes_eff = min_positive(max_codes_user, per_list_cap)` で list ごとの上限を作る（list 数は維持する）。
   - list ごとの上限は `max_codes_list = min(list_size_i, max_codes_eff, max_codes_cap_per_list if > 0)` とし、下限は `max(max_codes_list, min_codes_per_list if > 0)` を適用する。
   - `strict_budget=True` の場合は最終的な `sum(max_codes_list)` が `candidate_budget` を超えないよう比例縮小する（`min_codes_per_list` は守る）。
 - 予算配分 strategy:
   - `uniform`: `m_i = ceil(candidate_budget / nprobe_eff)` を基本とする。
   - `distance_weighted`: `d_i` を centroid 距離（L2）または `-score`（IP）とし、`z_i = (d_i - d_min) / (d_med - d_min + eps)`（`eps=1e-6`）を用いて正規化する。`z_i` は `[0, z_cap]`（`z_cap=8`）に clamp し、`w_i = exp(-alpha0 * z_i)`（`alpha0=3.0`）を計算する。`m_i = round(candidate_budget * w_i / sum(w))` を割り当て、上限/下限を適用する。
 - 補足: `min_positive(a, b)` は正の値のみから最小を取る（0/None は無制限扱い）。
+- 補足: `candidate_budget` は per-query の候補数予算であり、prefix total は `max_codes_total`、per-list は `per_list_cap` として解釈する。
 - 補足: `candidate_budget` が未指定の場合は `max_codes_user` のみで制限を決め、予算配分は行わない。
 - 補足: `dynamic_nprobe` は `budget_strategy="distance_weighted"` の場合のみ有効とする。
 - 補足: `dynamic_nprobe=True` の場合は、list を近い順（`w_i` 降順）に並べ、`min_codes_per_list` を先に配り、残予算を按分する。残予算が尽きた list 以降は `m_i=0` とし、`nprobe_eff = count(m_i > 0)` とする（`1 <= nprobe_eff <= nprobe_user`）。

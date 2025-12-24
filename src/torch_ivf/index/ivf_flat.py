@@ -299,15 +299,21 @@ class IndexIVFFlat(IndexBase):
                 per_list_sizes = self._allocate_candidate_sizes(top_lists, top_scores, config)
                 effective_max_codes = 0
                 if debug_stats is not None:
+                    per_list_cap = self._budget_to_max_codes(
+                        config.candidate_budget, config.nprobe, per_list=True
+                    )
                     debug_stats["budget_path"] = "per_list"
+                    debug_stats["per_list_cap"] = int(per_list_cap)
             else:
                 top_lists = self._top_probed_lists(xq, nprobe=config.nprobe)
-                max_codes_budget = self._budget_to_max_codes(config.candidate_budget, config.nprobe)
+                max_codes_budget = self._budget_to_max_codes(
+                    config.candidate_budget, config.nprobe, per_list=False
+                )
                 max_codes_eff = self._min_positive(config.max_codes, max_codes_budget)
                 effective_max_codes = self._effective_max_codes_for(config.nprobe, max_codes_eff)
                 if debug_stats is not None:
                     debug_stats["budget_path"] = "max_codes"
-                    debug_stats["max_codes_budget"] = int(max_codes_budget)
+                    debug_stats["max_codes_from_budget"] = int(max_codes_budget)
         else:
             top_lists = self._top_probed_lists(xq, nprobe=config.nprobe)
 
@@ -886,10 +892,12 @@ class IndexIVFFlat(IndexBase):
         return effective
 
     @staticmethod
-    def _budget_to_max_codes(candidate_budget: int, nprobe: int) -> int:
+    def _budget_to_max_codes(candidate_budget: int, nprobe: int, *, per_list: bool) -> int:
         budget = int(candidate_budget)
         if budget <= 0:
             return 0
+        if not per_list:
+            return budget
         probe = max(1, int(nprobe))
         return (budget + probe - 1) // probe
 
