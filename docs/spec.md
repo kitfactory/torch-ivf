@@ -517,6 +517,8 @@ def search_ivf_csr(
   - `max_codes_user` は `params.max_codes` があればそれを用い、無ければ `IndexIVFFlat.max_codes` を用いる。
   - Exact（`approximate=False`）: `max_codes_eff = max_codes_user`, `nprobe_eff = nprobe_user`。
   - Approx（`approximate=True`）: `nprobe_eff = nprobe_user`（`dynamic_nprobe=True` の場合でも上限は `nprobe_user`。減少のみ許可）。`candidate_budget` が指定される場合は `max_codes_from_budget = ceil(candidate_budget / nprobe_eff)` を求め、`max_codes_eff = min_positive(max_codes_user, max_codes_from_budget)` とする。
+    - `use_per_list_sizes=False` の場合は `max_codes` prefix 経路でスキャン量を削減する（比較用途。budget が小さいと recall が早期に崩れることがある）。
+    - `use_per_list_sizes=True` の場合は per-list cap を優先し、list 数は維持する（起動回数削減は CSR-large v2 とセットで解消する）。
   - list ごとの上限は `max_codes_list = min(list_size_i, max_codes_eff, max_codes_cap_per_list if > 0)` とし、下限は `max(max_codes_list, min_codes_per_list if > 0)` を適用する。
   - `strict_budget=True` の場合は最終的な `sum(max_codes_list)` が `candidate_budget` を超えないよう比例縮小する（`min_codes_per_list` は守る）。
 - 予算配分 strategy:

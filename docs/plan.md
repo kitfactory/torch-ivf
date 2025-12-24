@@ -13,6 +13,18 @@
 
 ---
 
+
+## Done（最近の追加）
+- [x] 派生キャッシュの無効化と再生成ルールを統一（train/add/reset/max_codes/nprobe/to）
+- [x] CSR 経路の同期削減（hot ループ内の .item() 排除）
+- [x] CSR ワークスペースの再利用徹底
+- [x] candidate_budget の max_codes 畳み込み経路＋debug_stats 拡充
+
+## Next（現在のフォーカス）
+- [ ] candidate_budget sweep（max_codes 畳み込み）で recall/QPS の閾値を確定
+- [ ] CSR-large v2（list-block batching）で起動回数を削減
+- [ ] per-list cap（use_per_list_sizes）を CSR-large v2 と組み合わせて本命経路にする
+
 ## Now（次に潰す：優先順）
 
 ### 0) P1 性能改善（Eager-only / Windows+ROCm 維持）
