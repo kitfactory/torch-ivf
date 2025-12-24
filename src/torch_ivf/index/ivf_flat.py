@@ -1614,6 +1614,8 @@ class IndexIVFFlat(IndexBase):
         block_size = self._csr_list_block_size()
         if block_size <= 1 or not groups_cpu:
             return False
+        pad_ratio_limit = float(self._csr_block_pad_ratio_limit())
+        max_block_elements = int(self._csr_block_max_elements())
 
         vec_chunk = self._csr_vec_chunk(buffered=False)
         offsets_cpu = (
@@ -1653,9 +1655,10 @@ class IndexIVFFlat(IndexBase):
 
         group_entries.sort(key=lambda v: (v[0], v[1]))
 
-        candidate_sizes = [block_size]
-        if block_size > 2:
-            candidate_sizes.append(block_size // 2)
+        candidate_sizes: list[int] = []
+        for size in (block_size, 16, 8, 4):
+            if size > 1 and size <= block_size and size not in candidate_sizes:
+                candidate_sizes.append(size)
         chosen_block = 1
         for size in candidate_sizes:
             if size <= 1:
@@ -1671,7 +1674,11 @@ class IndexIVFFlat(IndexBase):
                 cost_list = sum(gs * ls for gs, ls in zip(g_sizes, l_sizes))
                 if cost_list <= 0:
                     continue
-                if cost_block > cost_list * 2:
+                if max_block_elements > 0 and cost_block > max_block_elements:
+                    ok = False
+                    break
+                pad_ratio = cost_block / cost_list
+                if pad_ratio > pad_ratio_limit:
                     ok = False
                     break
             if ok:
@@ -1685,6 +1692,7 @@ class IndexIVFFlat(IndexBase):
 
         if debug_stats is not None:
             debug_stats["list_block_size"] = int(chosen_block)
+            debug_stats["blocked_pad_ratio_limit"] = float(pad_ratio_limit)
 
         for block_start in range(0, len(group_entries), chosen_block):
             block = group_entries[block_start : block_start + chosen_block]
@@ -1693,6 +1701,10 @@ class IndexIVFFlat(IndexBase):
             gmax = max(g_sizes)
             lmax = max(l_sizes)
             bcount = len(block)
+            pad_ratio = 0.0
+            pad_den = sum(gs * ls for gs, ls in zip(g_sizes, l_sizes))
+            if pad_den > 0:
+                pad_ratio = (bcount * gmax * lmax) / pad_den
 
             q_pad = self._workspace.ensure(
                 "csr_block_q", (bcount, gmax, d), dtype=self.dtype, device=device
@@ -1741,6 +1753,9 @@ class IndexIVFFlat(IndexBase):
             offsets_buf[:bcount].copy_(offsets_cpu_tensor)
 
             if debug_stats is not None:
+                prev_ratio = float(debug_stats.get("blocked_pad_ratio_max", 0.0))
+                if pad_ratio > prev_ratio:
+                    debug_stats["blocked_pad_ratio_max"] = float(pad_ratio)
                 debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
                 debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
                 debug_stats["list_blocks"] = int(debug_stats.get("list_blocks", 0)) + 1
@@ -1787,47 +1802,21 @@ class IndexIVFFlat(IndexBase):
             offsets = offsets_buf[:bcount].view(bcount, 1, 1)
             cand_packed = cand_j + offsets
 
-            rows = int(sum(g_sizes))
-            if rows <= 0:
-                continue
-            merge_scores = self._workspace.ensure(
-                "csr_block_merge_scores", (rows, k), dtype=self.dtype, device=device
-            )
-            merge_scores.fill_(fill)
-            merge_packed = self._workspace.ensure(
-                "csr_block_merge_packed", (rows, k), dtype=torch.long, device=device
-            )
-            merge_packed.fill_(-1)
-            merge_qids = self._workspace.ensure(
-                "csr_block_merge_qids", (rows,), dtype=torch.long, device=device
-            )
-
-            offset = 0
             for i, q_ids in enumerate(query_ids_list):
                 gsize = int(q_ids.numel())
                 if gsize <= 0:
                     continue
-                merge_qids[offset : offset + gsize] = q_ids
-                merge_scores[offset : offset + gsize, :topk] = cand_scores[i, :gsize]
-                merge_packed[offset : offset + gsize, :topk] = cand_packed[i, :gsize]
-                offset += gsize
-
-            if offset > 0:
                 self._merge_topk(
                     best_scores,
                     best_packed,
-                    merge_qids[:offset],
-                    merge_scores[:offset],
-                    merge_packed[:offset],
+                    q_ids,
+                    cand_scores[i, :gsize],
+                    cand_packed[i, :gsize],
                     k,
                     largest=largest,
                 )
                 if debug_stats is not None:
                     debug_stats["blocked_merge_calls"] = int(debug_stats.get("blocked_merge_calls", 0)) + 1
-                    debug_stats["blocked_pack_rows"] = int(debug_stats.get("blocked_pack_rows", 0)) + int(offset)
-                    debug_stats["blocked_pack_elems"] = int(debug_stats.get("blocked_pack_elems", 0)) + int(
-                        offset * k
-                    )
         return True
 
     def _search_csr_buffered_chunk(
@@ -2040,7 +2029,20 @@ class IndexIVFFlat(IndexBase):
     def _csr_list_block_size(self) -> int:
         if self.device.type == "cpu":
             return 1
-        return 4
+        return 16
+
+    def _csr_block_pad_ratio_limit(self) -> float:
+        if self.device.type == "cpu":
+            return 1.0
+        return 1.15
+
+    def _csr_block_max_elements(self) -> int:
+        elem_size = torch.tensor([], dtype=self.dtype).element_size()
+        if self.device.type == "cpu":
+            target_bytes = 16 * 1024 * 1024
+        else:
+            target_bytes = 64 * 1024 * 1024
+        return max(1, int(target_bytes // max(1, elem_size)))
 
     def _csr_task_budget(self) -> int:
         if self.device.type == "cpu":

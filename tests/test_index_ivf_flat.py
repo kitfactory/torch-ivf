@@ -269,3 +269,44 @@ def test_rebuild_lists_residual_norm_orders_within_list():
     list0_ids = index._list_ids[:3].to("cpu").tolist()
     assert list0 == [1.0, 2.0, 3.0]
     assert list0_ids == [10, 20, 30]
+
+
+def test_ivf_csr_blocked_groups_matches_unblocked():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for blocked CSR test.")
+    d = 32
+    xb, xq = _toy_data(d=d, nb=1024, nq=512, seed=7)
+    device = torch.device("cuda")
+    xb = xb.to(device)
+    xq = xq.to(device)
+
+    index = IndexIVFFlat(d, nlist=32, nprobe=8, device=device)
+    index.train(xb)
+    index.add(xb)
+    index.search_mode = "csr"
+    index._csr_small_batch_avg_group_threshold = 0.0
+
+    params = SearchParams(
+        profile="approx",
+        approximate=True,
+        candidate_budget=8192,
+        budget_strategy="uniform",
+        use_per_list_sizes=True,
+        debug_stats=True,
+    )
+
+    def run(block_size: int):
+        index._csr_list_block_size = lambda: block_size
+        index._csr_block_pad_ratio_limit = lambda: 10.0
+        index._csr_block_max_elements = lambda: 1_000_000_000
+        dists, ids = index.search(xq, k=5, params=params)
+        stats = index.last_search_stats
+        return dists, ids, stats
+
+    d_block, i_block, stats_block = run(4)
+    assert stats_block is not None
+    assert stats_block.get("blocked_blocks", 0) > 0
+
+    d_list, i_list, _ = run(1)
+    assert torch.allclose(d_block.cpu(), d_list.cpu(), atol=1e-5)
+    assert torch.equal(i_block.cpu(), i_list.cpu())
