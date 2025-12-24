@@ -30,6 +30,8 @@ class IndexIVFFlat:
     def train(self, xb: torch.Tensor) -> None: ...
     def add(self, xb: torch.Tensor) -> None: ...
     def reset(self) -> None: ...
+    @property
+    def last_search_stats(self) -> dict | None: ...
     def to(self, device: torch.device | str) -> "IndexIVFFlat": ...
 ```
 
@@ -50,6 +52,8 @@ class SearchParams:
     min_codes_per_list: int
     max_codes_cap_per_list: int
     strict_budget: bool
+    use_per_list_sizes: bool
+    debug_stats: bool
 ```
 
 解決順序: profile の既定値 → Index 設定 → 明示 SearchParams。`dynamic_nprobe` は `budget_strategy="distance_weighted"` のみ有効で、`nprobe_user` を上限として減少のみ許可する。
@@ -86,6 +90,7 @@ class _ApproximateConfig:
     min_codes_per_list: int
     max_codes_cap_per_list: int
     strict_budget: bool
+    debug_stats: bool
     list_ordering: str | None  # none / residual_norm_asc / proj_desc
     rebuild_policy: str  # manual / auto_threshold
     rebuild_threshold_adds: int

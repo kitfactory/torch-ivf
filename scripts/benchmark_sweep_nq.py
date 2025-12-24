@@ -75,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--torch-search-modes", default="matrix,csr", help="comma separated torch search_mode values (matrix, csr, auto)")
     p.add_argument("--jsonl", default="benchmarks/benchmarks.jsonl", help="append results to this JSONL file")
     p.add_argument("--json", action="store_true", help="print JSON only (still appends to --jsonl)")
+    p.add_argument("--skip-faiss", action="store_true", help="skip faiss-cpu benchmark")
     return p.parse_args()
 
 
@@ -181,18 +182,22 @@ def main() -> None:
     torch_train_ms = (t1 - t0) * 1000
     torch_add_ms = (t2 - t1) * 1000
 
-    metric = faiss.METRIC_L2 if args.metric == "l2" else faiss.METRIC_INNER_PRODUCT
-    quantizer = faiss.IndexFlatL2(args.dim) if args.metric == "l2" else faiss.IndexFlatIP(args.dim)
-    faiss_index = faiss.IndexIVFFlat(quantizer, args.dim, args.nlist, metric)
-    t0 = time.perf_counter()
-    faiss_index.train(train_np)
-    t1 = time.perf_counter()
-    faiss_index.add(base_np)
-    t2 = time.perf_counter()
-    faiss_train_ms = (t1 - t0) * 1000
-    faiss_add_ms = (t2 - t1) * 1000
-    faiss_index.nprobe = int(args.nprobe)
-    faiss_index.max_codes = int(args.max_codes)
+    faiss_index = None
+    faiss_train_ms = 0.0
+    faiss_add_ms = 0.0
+    if not args.skip_faiss:
+        metric = faiss.METRIC_L2 if args.metric == "l2" else faiss.METRIC_INNER_PRODUCT
+        quantizer = faiss.IndexFlatL2(args.dim) if args.metric == "l2" else faiss.IndexFlatIP(args.dim)
+        faiss_index = faiss.IndexIVFFlat(quantizer, args.dim, args.nlist, metric)
+        t0 = time.perf_counter()
+        faiss_index.train(train_np)
+        t1 = time.perf_counter()
+        faiss_index.add(base_np)
+        t2 = time.perf_counter()
+        faiss_train_ms = (t1 - t0) * 1000
+        faiss_add_ms = (t2 - t1) * 1000
+        faiss_index.nprobe = int(args.nprobe)
+        faiss_index.max_codes = int(args.max_codes)
 
     now = datetime.now().isoformat(timespec="seconds")
     host_os = f"{platform.system()} {platform.release()}"
@@ -239,37 +244,38 @@ def main() -> None:
                 )
             )
 
-        search_ms, search_ms_min = _time_faiss_search(faiss_index, xq_f, args.topk, warmup=warmup, repeat=repeat)
-        qps = nq / (search_ms / 1000) if search_ms > 0 else float("inf")
-        records.append(
-            NQSweepResult(
-                library="faiss_cpu",
-                device="cpu",
-                device_name=platform.processor() or "CPU",
-                backend="faiss-cpu",
-                search_mode="faiss",
-                metric=args.metric,
-                dim=args.dim,
-                nb=args.nb,
-                train_n=train_n,
-                nq=nq,
-                nlist=args.nlist,
-                nprobe=args.nprobe,
-                max_codes=int(args.max_codes),
-                topk=args.topk,
-                dtype=args.dtype,
-                warmup=warmup,
-                repeat=repeat,
-                train_ms=round(faiss_train_ms, 3),
-                add_ms=round(faiss_add_ms, 3),
-                search_ms=round(search_ms, 3),
-                search_ms_min=round(search_ms_min, 3),
-                qps=round(qps, 3),
-                timestamp=now,
-                host_os=host_os,
-                host_cpu=host_cpu,
+        if faiss_index is not None:
+            search_ms, search_ms_min = _time_faiss_search(faiss_index, xq_f, args.topk, warmup=warmup, repeat=repeat)
+            qps = nq / (search_ms / 1000) if search_ms > 0 else float("inf")
+            records.append(
+                NQSweepResult(
+                    library="faiss_cpu",
+                    device="cpu",
+                    device_name=platform.processor() or "CPU",
+                    backend="faiss-cpu",
+                    search_mode="faiss",
+                    metric=args.metric,
+                    dim=args.dim,
+                    nb=args.nb,
+                    train_n=train_n,
+                    nq=nq,
+                    nlist=args.nlist,
+                    nprobe=args.nprobe,
+                    max_codes=int(args.max_codes),
+                    topk=args.topk,
+                    dtype=args.dtype,
+                    warmup=warmup,
+                    repeat=repeat,
+                    train_ms=round(faiss_train_ms, 3),
+                    add_ms=round(faiss_add_ms, 3),
+                    search_ms=round(search_ms, 3),
+                    search_ms_min=round(search_ms_min, 3),
+                    qps=round(qps, 3),
+                    timestamp=now,
+                    host_os=host_os,
+                    host_cpu=host_cpu,
+                )
             )
-        )
 
     with open(args.jsonl, "a", encoding="utf-8") as f:
         for r in records:

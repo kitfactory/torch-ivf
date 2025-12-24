@@ -4,7 +4,7 @@ import torch
 
 import pytest
 
-from torch_ivf.index import IndexFlatL2, IndexIVFFlat
+from torch_ivf.index import IndexFlatL2, IndexIVFFlat, SearchParams
 
 
 def _toy_data(d=16, nb=512, nq=8, seed=0):
@@ -182,3 +182,67 @@ def test_ivf_workspace_reuse_does_not_change_results():
     assert torch.equal(i1.cpu(), i2.cpu())
     for name, cap in caps.items():
         assert index._workspace.capacity[name] >= cap
+
+
+def test_search_params_resolve_clamps_nprobe_and_prefers_explicit():
+    index = IndexIVFFlat(2, nlist=4, nprobe=2)
+    params = SearchParams(
+        profile="approx",
+        approximate=True,
+        nprobe=10,
+        max_codes=7,
+        candidate_budget=16,
+        budget_strategy="uniform",
+    )
+    config = index._resolve_search_params(params)
+    assert config.nprobe == 4
+    assert config.max_codes == 7
+    assert config.candidate_budget == 16
+
+
+def test_candidate_budget_dynamic_nprobe_skips_far_lists():
+    index = IndexIVFFlat(2, nlist=4)
+    offsets = torch.tensor([0, 10, 20, 30, 40], dtype=torch.long, device=index.device)
+    index._list_offsets = offsets
+    index._list_sizes = None
+
+    top_lists = torch.tensor([[0, 1, 2, 3]], dtype=torch.long, device=index.device)
+    top_scores = torch.tensor([[0.1, 1.0, 2.0, 3.0]], dtype=torch.float32, device=index.device)
+
+    params = SearchParams(
+        profile="approx",
+        approximate=True,
+        nprobe=4,
+        candidate_budget=2,
+        budget_strategy="distance_weighted",
+        dynamic_nprobe=True,
+        min_codes_per_list=1,
+        use_per_list_sizes=True,
+    )
+    config = index._resolve_search_params(params)
+    sizes = index._allocate_candidate_sizes(top_lists, top_scores, config)
+    sizes_cpu = sizes.to("cpu").tolist()[0]
+    assert sizes_cpu[0] > 0
+    assert sizes_cpu[1] > 0
+    assert sizes_cpu[2] == 0
+    assert sizes_cpu[3] == 0
+    assert sum(sizes_cpu) <= 2
+
+
+def test_rebuild_lists_residual_norm_orders_within_list():
+    index = IndexIVFFlat(1, nlist=2)
+    index._centroids = torch.tensor([[0.0], [10.0]], dtype=torch.float32, device=index.device)
+    index._packed_embeddings = torch.tensor([[3.0], [1.0], [2.0], [10.0], [12.0]], device=index.device)
+    index._packed_norms = (index._packed_embeddings * index._packed_embeddings).sum(dim=1)
+    index._list_ids = torch.tensor([30, 10, 20, 100, 120], dtype=torch.long, device=index.device)
+    index._list_offsets = torch.tensor([0, 3, 5], dtype=torch.long, device=index.device)
+    index._list_offsets_cpu = [0, 3, 5]
+    index._ntotal = 5
+    index._is_trained = True
+
+    index.rebuild_lists(ordering="residual_norm_asc")
+
+    list0 = index._packed_embeddings[:3].to("cpu").flatten().tolist()
+    list0_ids = index._list_ids[:3].to("cpu").tolist()
+    assert list0 == [1.0, 2.0, 3.0]
+    assert list0_ids == [10, 20, 30]

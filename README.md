@@ -4,7 +4,7 @@
 The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with a strong focus on Windows + ROCm).
 
 - 🔁 **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
-- 📈 **Up to 4.59x vs faiss-cpu in the throughput regime** (`nq=19600`: 44,686 / 9,740 ≒ 4.59x)
+- 📈 **Up to 5.07x vs faiss-cpu in the throughput regime** (`nq=19600`: 46,093 / 9,089 ≒ 5.07x)
 - 🧩 **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
 - 🧪 **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
 
@@ -44,17 +44,22 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 ## 📊 Benchmarks (representative values)
 
 > Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
-> Environment: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
-> Updated: `2025-12-21T13:43:37` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
+> Environment: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
+> Updated: `2025-12-21T15:31:06` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
 >
 > Note: this table is **fixed to `search_mode=csr`** to highlight the throughput regime. For normal usage, `search_mode=auto` is recommended.
 > faiss-cpu uses the default thread settings (environment-dependent). For reproducibility, fix `OMP_NUM_THREADS` (e.g. Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`).
 
 | nq | torch-ivf (ROCm GPU, csr) | faiss-cpu (CPU) |
 |---:|---:|---:|
-| 512 | **14,197 QPS** | 6,157 QPS |
-| 2,048 | **33,686 QPS** | 7,909 QPS |
-| 19,600 | **44,686 QPS** | 9,740 QPS |
+| 512 | **14,248 QPS** | 6,273 QPS |
+| 2,048 | **32,058 QPS** | 9,220 QPS |
+| 19,600 | **46,093 QPS** | 9,089 QPS |
+
+**Speed-leaning params (optional; recall trade-off)**  
+If you report QPS with these, include the exact params alongside the numbers.
+- `max_codes` (e.g. `32768`) to cap candidates per query.
+- `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")` (L2 only).
 
 ### Add performance (batch size sweep)
 
@@ -141,6 +146,7 @@ python examples/ivf_demo.py --device cuda --verify
 - [`scripts/benchmark_faiss_cpu.py`](scripts/benchmark_faiss_cpu.py): faiss-cpu reference benchmark
 - [`scripts/benchmark_sweep_nq.py`](scripts/benchmark_sweep_nq.py): sweep `nq` (tiny-batch vs throughput boundary)
 - [`scripts/benchmark_sweep_max_codes.py`](scripts/benchmark_sweep_max_codes.py): sweep `max_codes` (speed / self-recall)
+- [`scripts/benchmark_sweep_candidate_budget.py`](scripts/benchmark_sweep_candidate_budget.py): sweep `candidate_budget` (approx speed vs recall)
 - [`scripts/dump_env.py`](scripts/dump_env.py): generate [`benchmarks/env.json`](benchmarks/env.json)
 - [`scripts/profile_ivf_search.py`](scripts/profile_ivf_search.py): show `torch.profiler` table for `IndexIVFFlat.search`
 

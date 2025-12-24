@@ -111,7 +111,7 @@
 ## 定着（成果を壊さない）
 - [ ] README の “勝ち筋” を固定し、再現性を上げる（速度そのものより安定化を優先）。
   - [x] tiny-batch と throughput の二相を `nq` sweep（表＋図）で明記する。
-  - [x] `search_mode=auto` を正式化し、分岐条件（`avg_group = nq*nprobe/nlist`）と既定閾値を明記する。
+  - [x] `search_mode=auto` ???????????`avg_group = nq*nprobe/nlist` ? `nlist` ???????????????????
   - [x] `benchmarks/env.json` を生成できる仕組み（`scripts/dump_env.py`）を追加し、ベンチの前提環境を固定で記録できるようにする。
   - [ ] ベンチ再現手順（最小）を README に 1 か所にまとめる（`dump_env` → `benchmark` → `benchmarks.jsonl` の更新手順）。
   - [ ] “代表値の更新ポリシー” を明文化する（例: `--warmup/--repeat` と `search_ms=median` を固定）。

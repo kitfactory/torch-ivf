@@ -4,7 +4,7 @@
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
 
 - 🔁 **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
-- 📈 **throughput 領域で faiss-cpu を最大 4.75x**（`nq=19600` で 47,302 / 9,962 ≒ 4.75x）
+- 📈 **throughput 領域で faiss-cpu を最大 5.07x**（`nq=19600` で 46,093 / 9,089 ≒ 5.07x）
 - 🧩 **PyTorch の backend が動けば同じコードで動く**（CPU/CUDA/ROCm/DirectML。*One codebase across backends*）
 - 🧪 **実測・再現手順あり**（env/jsonl + scripts 同梱。*Reproducible benchmarks included*）
 
@@ -44,17 +44,22 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 ## 📊 実測（代表値）
 
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
-> 実行環境: Ryzen AI Max+ 395 / Windows 11 / PyTorch ROCm 7.1.1 preview  
-> 更新日時: `2025-12-14T10:40:28`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
+> 実行環境: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
+> 更新日時: `2025-12-21T15:31:06`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
 >
 > ※この表は throughput 領域を見せるため `search_mode=csr` 固定です。通常利用は `search_mode=auto` 推奨です。
 > faiss-cpu は既定スレッド設定（環境依存）です。再現する場合は `OMP_NUM_THREADS` を固定してください（例: Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`）。
 
 | nq | torch-ivf（ROCm GPU, csr） | faiss-cpu（CPU） |
 |---:|---:|---:|
-| 512 | **17,656 QPS** | 7,140 QPS |
-| 2,048 | **29,553 QPS** | 8,264 QPS |
-| 19,600 | **47,302 QPS** | 9,962 QPS |
+| 512 | **14,248 QPS** | 6,273 QPS |
+| 2,048 | **32,058 QPS** | 9,220 QPS |
+| 19,600 | **46,093 QPS** | 9,089 QPS |
+
+**速度優先パラメータ（任意・recall低下の可能性あり）**  
+これらの条件でQPSを記載する場合は、パラメータも併記してください。
+- `max_codes`（例: `32768`）で候補数の上限を設定する。
+- `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")`（L2のみ）。
 
 ### グラフ：QPS vs nq（tiny-batch → throughput）
 
@@ -131,6 +136,7 @@ python examples/ivf_demo.py --device cuda --verify
 - [`scripts/benchmark_faiss_cpu.py`](scripts/benchmark_faiss_cpu.py): faiss-cpu 参照ベンチ
 - [`scripts/benchmark_sweep_nq.py`](scripts/benchmark_sweep_nq.py): `nq` スイープ（tiny-batch vs throughput の境界）
 - [`scripts/benchmark_sweep_max_codes.py`](scripts/benchmark_sweep_max_codes.py): `max_codes` スイープ（速度/自己比較 recall）
+- [`scripts/benchmark_sweep_candidate_budget.py`](scripts/benchmark_sweep_candidate_budget.py): `candidate_budget` ?????approx ???/recall?
 - [`scripts/dump_env.py`](scripts/dump_env.py): [`benchmarks/env.json`](benchmarks/env.json) を生成
 - [`scripts/profile_ivf_search.py`](scripts/profile_ivf_search.py): `IndexIVFFlat.search` の `torch.profiler` 表を表示
 

@@ -171,10 +171,10 @@ IVFFlat で「probed lists の中で厳密に top-k」を求める限り、原�
 
 - `"matrix"`: 既存の固定形状 `index_matrix` + batched gather + 1 回の巨大 `topk`。
 - `"csr"`: CSR/slice + online topk（vNext）。
-- `"auto"`: GPU（ROCm/CUDA）のみ自動分岐。`avg_group = (nq * nprobe / nlist)` を用い、`avg_group >= auto_search_avg_group_threshold` のとき `"csr"`、それ以外は `"matrix"`。
+- `"auto"`: GPU?ROCm/CUDA????????`avg_group = (nq * nprobe / nlist)` ????`avg_group >= auto_search_avg_group_threshold * (nlist / 512)` ??? "csr"?????? "matrix"?
 
 補足:
-- `auto_search_avg_group_threshold` は既定 `8.0`（`nlist=512, nprobe=32` なら `nq>=128` で `"csr"` を選ぶ）。
+- `auto_search_avg_group_threshold` ??? `8.0`?`nlist=512, nprobe=32` ?? `nq>=128` ? "csr" ?????
 - CPU では `"auto"` は `"matrix"` と同等に扱う（安定性優先）。
 
 #### 5.5.4 小バッチ最適化（vNext.1）
@@ -482,6 +482,9 @@ def search_ivf_csr(
   - `min_codes_per_list: int = 0`
   - `max_codes_cap_per_list: int = 0`
   - `strict_budget: bool = False`
+  - `use_per_list_sizes: bool = False`
+- `debug_stats: bool = False`
+- `debug_stats=True` ???????????? `IndexIVFFlat.last_search_stats` ??????
 - 解決順序: `profile` は既定値テンプレとして使い、`IndexIVFFlat` の設定を上書きしない。明示的な SearchParams の値は `IndexIVFFlat` の設定より常に優先する。
 - 入力バリデーション: `nprobe` は 1 以上、`max_codes` は 0 以上でなければならない。`candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。`nprobe > nlist` の場合は `nprobe_eff = nlist` に clamp する。
 

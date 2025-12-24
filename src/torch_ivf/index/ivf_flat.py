@@ -1,12 +1,53 @@
 from __future__ import annotations
 
 import heapq
-from typing import Optional
+from dataclasses import dataclass
+from typing import Literal, Optional
 
 import torch
 
 from ..nn import kmeans
 from .base import IndexBase, MetricType
+
+
+@dataclass(frozen=True)
+class SearchParams:
+    profile: Literal["exact", "speed", "approx"] = "speed"
+    safe_pruning: bool = True
+    approximate: bool = False
+    nprobe: int | None = None
+    max_codes: int | None = None
+    candidate_budget: int | None = None
+    budget_strategy: Literal["uniform", "distance_weighted"] = "distance_weighted"
+    list_ordering: Literal["none", "residual_norm_asc", "proj_desc"] | None = None
+    rebuild_policy: Literal["manual", "auto_threshold"] = "manual"
+    rebuild_threshold_adds: int = 0
+    dynamic_nprobe: bool = False
+    min_codes_per_list: int = 0
+    max_codes_cap_per_list: int = 0
+    strict_budget: bool = False
+    use_per_list_sizes: bool = False
+    debug_stats: bool = False
+
+
+@dataclass(frozen=True)
+class _ResolvedSearchConfig:
+    profile: str
+    safe_pruning: bool
+    approximate: bool
+    nprobe: int
+    max_codes: int
+    candidate_budget: int | None
+    budget_strategy: str
+    list_ordering: str | None
+    rebuild_policy: str
+    rebuild_threshold_adds: int
+    dynamic_nprobe: bool
+    min_codes_per_list: int
+    max_codes_cap_per_list: int
+    strict_budget: bool
+    use_per_list_sizes: bool
+    debug_stats: bool
 
 
 class _Workspace:
@@ -72,6 +113,11 @@ class IndexIVFFlat(IndexBase):
         self._auto_search_avg_group_threshold = 8.0
         self._csr_small_batch_avg_group_threshold = 64.0
         self._approximate_mode = False
+        self._list_ordering: str | None = None
+        self._rebuild_policy = "manual"
+        self._rebuild_threshold_adds = 0
+        self._adds_since_rebuild = 0
+        self._last_search_stats: dict[str, float | int | str] | None = None
         self._reset_storage()
 
     # ------------------------------------------------------------------ #
@@ -143,6 +189,10 @@ class IndexIVFFlat(IndexBase):
     def approximate_mode(self, value: bool) -> None:
         self._approximate_mode = bool(value)
 
+    @property
+    def last_search_stats(self) -> dict[str, float | int | str] | None:
+        return self._last_search_stats
+
     # ------------------------------------------------------------------ #
     # Core API
     # ------------------------------------------------------------------ #
@@ -178,6 +228,8 @@ class IndexIVFFlat(IndexBase):
         self._list_ids = torch.empty(0, dtype=torch.long, device=self.device)
         self._is_trained = True
         self._ntotal = 0
+        self._list_ordering = None
+        self._adds_since_rebuild = 0
         self._invalidate_search_cache()
 
     def add(self, xb: torch.Tensor) -> None:
@@ -192,6 +244,7 @@ class IndexIVFFlat(IndexBase):
             dtype=torch.long,
         )
         self._assign_and_append(xb, ids)
+        self._adds_since_rebuild += int(xb.shape[0])
 
     def add_with_ids(self, xb: torch.Tensor, ids: torch.Tensor) -> None:
         self._ensure_trained()
@@ -201,8 +254,11 @@ class IndexIVFFlat(IndexBase):
         if ids.dtype not in {torch.long, torch.int64}:
             raise ValueError("ids must be torch.long.")
         self._assign_and_append(xb, ids.to(self.device))
+        self._adds_since_rebuild += int(xb.shape[0])
 
-    def search(self, xq: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def search(
+        self, xq: torch.Tensor, k: int, *, params: SearchParams | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         self._ensure_ready_for_search(k)
         xq = self._validate_input(xq)
         if xq.shape[0] == 0:
@@ -211,19 +267,84 @@ class IndexIVFFlat(IndexBase):
                 torch.empty(0, k, dtype=torch.long, device=self.device),
             )
 
-        effective_max_codes = self._effective_max_codes()
+        config = self._resolve_search_params(params)
+        if config.list_ordering is not None:
+            self._maybe_rebuild_lists(config)
+
+        top_lists: torch.Tensor
+        per_list_sizes: torch.Tensor | None = None
+        effective_max_codes = self._effective_max_codes_for(config.nprobe, config.max_codes)
+        debug_stats: dict[str, float | int | str] | None = None
+        if config.debug_stats:
+            debug_stats = {
+                "nq": int(xq.shape[0]),
+                "nprobe_user": int(config.nprobe),
+                "candidate_budget": int(config.candidate_budget or 0),
+                "approximate": int(config.approximate),
+                "use_per_list_sizes": int(config.use_per_list_sizes),
+            }
+        else:
+            self._last_search_stats = None
+
+        if config.approximate and config.candidate_budget is not None:
+            if config.use_per_list_sizes:
+                top_lists, top_scores = self._top_probed_lists_with_scores(xq, nprobe=config.nprobe)
+                per_list_sizes = self._allocate_candidate_sizes(top_lists, top_scores, config)
+                effective_max_codes = 0
+                if debug_stats is not None:
+                    debug_stats["budget_path"] = "per_list"
+            else:
+                top_lists = self._top_probed_lists(xq, nprobe=config.nprobe)
+                max_codes_budget = self._budget_to_max_codes(config.candidate_budget, config.nprobe)
+                max_codes_eff = self._min_positive(config.max_codes, max_codes_budget)
+                effective_max_codes = self._effective_max_codes_for(config.nprobe, max_codes_eff)
+                if debug_stats is not None:
+                    debug_stats["budget_path"] = "max_codes"
+                    debug_stats["max_codes_budget"] = int(max_codes_budget)
+        else:
+            top_lists = self._top_probed_lists(xq, nprobe=config.nprobe)
 
         if self._search_mode == "csr":
-            return self._search_csr_online(xq, k, max_codes=effective_max_codes)
+            results = self._search_csr_online(
+                xq,
+                k,
+                max_codes=effective_max_codes,
+                nprobe=config.nprobe,
+                top_lists=top_lists,
+                per_list_sizes=per_list_sizes,
+                debug_stats=debug_stats,
+            )
+            if debug_stats is not None:
+                debug_stats["search_path"] = "csr"
+                debug_stats["nprobe_eff"] = int(config.nprobe)
+                debug_stats["max_codes_eff"] = int(effective_max_codes)
+                self._last_search_stats = debug_stats
+            return results
 
         if self._search_mode == "auto" and xq.device.type == "cuda":
-            probe = min(self._nprobe, self._nlist)
+            probe = min(config.nprobe, self._nlist)
             avg_group_size = (xq.shape[0] * probe) / max(1, self._nlist)
-            if avg_group_size >= self._auto_search_avg_group_threshold:
-                return self._search_csr_online(xq, k, max_codes=effective_max_codes)
+            auto_threshold = self._auto_search_avg_group_threshold * (self._nlist / 512)
+            if avg_group_size >= auto_threshold:
+                results = self._search_csr_online(
+                    xq,
+                    k,
+                    max_codes=effective_max_codes,
+                    nprobe=config.nprobe,
+                    top_lists=top_lists,
+                    per_list_sizes=per_list_sizes,
+                    debug_stats=debug_stats,
+                )
+                if debug_stats is not None:
+                    debug_stats["search_path"] = "csr"
+                    debug_stats["nprobe_eff"] = int(config.nprobe)
+                    debug_stats["max_codes_eff"] = int(effective_max_codes)
+                    self._last_search_stats = debug_stats
+                return results
 
-        top_lists = self._top_probed_lists(xq)
-        query_candidate_counts = self._estimate_candidates_per_query(top_lists, max_codes=effective_max_codes)
+        query_candidate_counts = self._estimate_candidates_per_query(
+            top_lists, max_codes=effective_max_codes, per_list_sizes=per_list_sizes
+        )
         query_candidate_counts_cpu = query_candidate_counts.to("cpu")
         chunks = self._iter_query_chunks(query_candidate_counts)
         dists = torch.empty((xq.shape[0], k), dtype=self.dtype, device=self.device)
@@ -238,16 +359,25 @@ class IndexIVFFlat(IndexBase):
                 if max_candidates > 0
                 else torch.empty(0, dtype=torch.long, device=self.device)
             )
+            chunk_sizes = per_list_sizes[start:end] if per_list_sizes is not None else None
             index_matrix, query_counts = self._build_candidate_index_matrix_from_lists(
                 chunk_lists,
                 max_candidates=max_candidates,
                 pos_1d=pos_1d,
                 max_codes=effective_max_codes,
+                per_list_sizes=chunk_sizes,
             )
             chunk_dists, chunk_labels = self._search_from_index_matrix(chunk_q, index_matrix, query_counts, k)
             dists[start:end] = chunk_dists
             labels[start:end] = chunk_labels
 
+        if debug_stats is not None:
+            debug_stats["search_path"] = "matrix"
+            debug_stats["nprobe_eff"] = int(config.nprobe)
+            debug_stats["max_codes_eff"] = int(effective_max_codes)
+            debug_stats["chunks"] = int(len(chunks))
+            debug_stats["total_candidates_est"] = int(query_candidate_counts.sum().item())
+            self._last_search_stats = debug_stats
         return dists, labels
 
     def range_search(self, xq: torch.Tensor, radius: float):
@@ -307,6 +437,8 @@ class IndexIVFFlat(IndexBase):
         self._reset_storage()
         self._ntotal = 0
         self._is_trained = False
+        self._list_ordering = None
+        self._adds_since_rebuild = 0
         self._invalidate_search_cache()
 
     # ------------------------------------------------------------------ #
@@ -347,6 +479,8 @@ class IndexIVFFlat(IndexBase):
         self.max_codes = int(state.get("max_codes", self._max_codes))
         self._is_trained = self._centroids.numel() > 0
         self._ntotal = self._packed_embeddings.shape[0]
+        self._list_ordering = None
+        self._adds_since_rebuild = 0
         self._invalidate_search_cache()
 
     def save(self, path: str) -> None:
@@ -375,6 +509,158 @@ class IndexIVFFlat(IndexBase):
         self._ensure_trained()
         if k <= 0:
             raise ValueError("k must be positive.")
+
+    def _resolve_search_params(self, params: SearchParams | None) -> _ResolvedSearchConfig:
+        if params is None:
+            profile = "speed"
+            safe_pruning = True
+            approximate = bool(self._approximate_mode)
+            nprobe = self._nprobe
+            max_codes = self._max_codes
+            candidate_budget = None
+            budget_strategy = "distance_weighted"
+            list_ordering = None
+            rebuild_policy = "manual"
+            rebuild_threshold_adds = 0
+            dynamic_nprobe = False
+            min_codes_per_list = 0
+            max_codes_cap_per_list = 0
+            strict_budget = False
+            use_per_list_sizes = False
+            debug_stats = False
+        else:
+            profile = params.profile
+            safe_pruning = bool(params.safe_pruning)
+            approximate = bool(params.approximate)
+            nprobe = self._nprobe if params.nprobe is None else int(params.nprobe)
+            max_codes = self._max_codes if params.max_codes is None else int(params.max_codes)
+            candidate_budget = params.candidate_budget
+            budget_strategy = params.budget_strategy
+            list_ordering = params.list_ordering
+            rebuild_policy = params.rebuild_policy
+            rebuild_threshold_adds = params.rebuild_threshold_adds
+            dynamic_nprobe = bool(params.dynamic_nprobe)
+            min_codes_per_list = int(params.min_codes_per_list)
+            max_codes_cap_per_list = int(params.max_codes_cap_per_list)
+            strict_budget = bool(params.strict_budget)
+            use_per_list_sizes = bool(params.use_per_list_sizes)
+            debug_stats = bool(params.debug_stats)
+
+        if profile not in {"exact", "speed", "approx"}:
+            raise ValueError("profile must be 'exact', 'speed', or 'approx'.")
+        if nprobe <= 0:
+            raise ValueError("nprobe must be >= 1.")
+        if max_codes < 0:
+            raise ValueError("max_codes must be >= 0.")
+        if candidate_budget is not None:
+            candidate_budget = int(candidate_budget)
+        if candidate_budget is not None and candidate_budget < 0:
+            raise ValueError("candidate_budget must be >= 0.")
+        if budget_strategy not in {"uniform", "distance_weighted"}:
+            raise ValueError("budget_strategy must be 'uniform' or 'distance_weighted'.")
+        if list_ordering not in {None, "none", "residual_norm_asc", "proj_desc"}:
+            raise ValueError("list_ordering must be None or one of 'none', 'residual_norm_asc', 'proj_desc'.")
+        if rebuild_policy not in {"manual", "auto_threshold"}:
+            raise ValueError("rebuild_policy must be 'manual' or 'auto_threshold'.")
+        if rebuild_threshold_adds < 0:
+            raise ValueError("rebuild_threshold_adds must be >= 0.")
+        if min_codes_per_list < 0:
+            raise ValueError("min_codes_per_list must be >= 0.")
+        if max_codes_cap_per_list < 0:
+            raise ValueError("max_codes_cap_per_list must be >= 0.")
+
+        if candidate_budget is not None and candidate_budget == 0:
+            candidate_budget = None
+
+        if list_ordering == "none":
+            list_ordering = None
+
+        nprobe = min(nprobe, self._nlist)
+
+        if approximate and candidate_budget is not None and self.metric != "l2":
+            raise NotImplementedError("Approximate mode is only supported for L2 in Phase P1.")
+        if list_ordering is not None and self.metric != "l2":
+            raise NotImplementedError("list_ordering is only supported for L2 in Phase P1.")
+        if list_ordering == "proj_desc" and self.metric == "l2":
+            raise ValueError("proj_desc is only supported for IP in Phase 2.")
+        if self.metric != "l2":
+            safe_pruning = False
+
+        if candidate_budget is not None and not approximate:
+            raise ValueError("candidate_budget requires approximate=True.")
+
+        if dynamic_nprobe and budget_strategy != "distance_weighted":
+            dynamic_nprobe = False
+        if dynamic_nprobe and candidate_budget is None:
+            dynamic_nprobe = False
+
+        if use_per_list_sizes and candidate_budget is None:
+            raise ValueError("use_per_list_sizes requires candidate_budget.")
+        if (strict_budget or min_codes_per_list > 0 or max_codes_cap_per_list > 0 or dynamic_nprobe) and not use_per_list_sizes:
+            raise ValueError("per-list budgeting requires use_per_list_sizes=True.")
+
+        if approximate and list_ordering is None and self.metric == "l2":
+            list_ordering = "residual_norm_asc"
+
+        return _ResolvedSearchConfig(
+            profile=profile,
+            safe_pruning=safe_pruning,
+            approximate=approximate,
+            nprobe=nprobe,
+            max_codes=max_codes,
+            candidate_budget=candidate_budget,
+            budget_strategy=budget_strategy,
+            list_ordering=list_ordering,
+            rebuild_policy=rebuild_policy,
+            rebuild_threshold_adds=rebuild_threshold_adds,
+            dynamic_nprobe=dynamic_nprobe,
+            min_codes_per_list=min_codes_per_list,
+            max_codes_cap_per_list=max_codes_cap_per_list,
+            strict_budget=strict_budget,
+            use_per_list_sizes=use_per_list_sizes,
+            debug_stats=debug_stats,
+        )
+
+    def _maybe_rebuild_lists(self, config: _ResolvedSearchConfig) -> None:
+        if config.list_ordering is None:
+            return
+        if config.rebuild_policy == "auto_threshold":
+            threshold = int(config.rebuild_threshold_adds)
+            if self._list_ordering != config.list_ordering:
+                self.rebuild_lists(ordering=config.list_ordering)
+                return
+            if threshold > 0 and self._adds_since_rebuild >= threshold:
+                self.rebuild_lists(ordering=config.list_ordering)
+
+    def rebuild_lists(self, *, ordering: str | None = None) -> None:
+        if ordering is None:
+            ordering = self._list_ordering or "residual_norm_asc"
+        if ordering not in {"residual_norm_asc"}:
+            raise ValueError("ordering must be 'residual_norm_asc'.")
+        if self.metric != "l2":
+            raise NotImplementedError("rebuild_lists is only supported for L2 in Phase P1.")
+        if self._ntotal == 0:
+            self._list_ordering = ordering
+            self._adds_since_rebuild = 0
+            return
+
+        offsets_cpu = self._list_offsets.to("cpu").tolist()
+        for list_id in range(self._nlist):
+            a = int(offsets_cpu[list_id])
+            b = int(offsets_cpu[list_id + 1])
+            if b - a <= 1:
+                continue
+            x = self._packed_embeddings[a:b]
+            c = self._centroids[list_id].to(self.dtype)
+            diff = x - c
+            key = (diff * diff).sum(dim=1)
+            order = torch.argsort(key)
+            self._packed_embeddings[a:b] = x.index_select(0, order)
+            self._packed_norms[a:b] = self._packed_norms[a:b].index_select(0, order)
+            self._list_ids[a:b] = self._list_ids[a:b].index_select(0, order)
+
+        self._list_ordering = ordering
+        self._adds_since_rebuild = 0
 
     def _invalidate_search_cache(self) -> None:
         self._centroids_t = None
@@ -536,27 +822,47 @@ class IndexIVFFlat(IndexBase):
         chunk = max(1, budget // denom)
         return min(total_queries, chunk)
 
-    def _top_probed_lists(self, xq: torch.Tensor) -> torch.Tensor:
+    def _top_probed_lists(self, xq: torch.Tensor, *, nprobe: int | None = None) -> torch.Tensor:
         if xq.shape[0] == 0 or self._centroids.shape[0] == 0:
             return torch.empty((xq.shape[0], 0), dtype=torch.long, device=self.device)
         centroid_scores = self._pairwise_centroids(xq)
-        probe = min(self._nprobe, centroid_scores.shape[1])
+        probe_in = self._nprobe if nprobe is None else int(nprobe)
+        probe = min(probe_in, centroid_scores.shape[1])
         if probe <= 0:
             return torch.empty((xq.shape[0], 0), dtype=torch.long, device=self.device)
         largest = self.metric == "ip"
         _, top_lists = torch.topk(centroid_scores, probe, largest=largest, dim=1)
         return top_lists
 
+    def _top_probed_lists_with_scores(
+        self, xq: torch.Tensor, *, nprobe: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if xq.shape[0] == 0 or self._centroids.shape[0] == 0:
+            empty = torch.empty((xq.shape[0], 0), dtype=torch.long, device=self.device)
+            return empty, torch.empty((xq.shape[0], 0), dtype=self.dtype, device=self.device)
+        centroid_scores = self._pairwise_centroids(xq)
+        probe = min(int(nprobe), centroid_scores.shape[1])
+        if probe <= 0:
+            empty = torch.empty((xq.shape[0], 0), dtype=torch.long, device=self.device)
+            return empty, torch.empty((xq.shape[0], 0), dtype=self.dtype, device=self.device)
+        largest = self.metric == "ip"
+        top_scores, top_lists = torch.topk(centroid_scores, probe, largest=largest, dim=1)
+        return top_lists, top_scores
+
     def _effective_max_codes(self) -> int:
-        max_codes = int(self._max_codes)
-        if max_codes <= 0:
+        return self._effective_max_codes_for(self._nprobe, self._max_codes)
+
+    def _effective_max_codes_for(self, nprobe: int, max_codes: int) -> int:
+        max_codes_i = int(max_codes)
+        if max_codes_i <= 0:
             return 0
 
-        cached = self._effective_max_codes_cache
+        use_cache = nprobe == self._nprobe and max_codes_i == self._max_codes
+        cached = self._effective_max_codes_cache if use_cache else None
         if cached is not None:
             return cached
 
-        probe = min(self._nprobe, self._nlist)
+        probe = min(int(nprobe), self._nlist)
         if probe <= 0:
             return 0
 
@@ -567,13 +873,173 @@ class IndexIVFFlat(IndexBase):
         else:
             max_possible = sum(heapq.nlargest(probe, sizes))
 
-        effective = 0 if max_codes >= max_possible else max_codes
-        self._effective_max_codes_cache = effective
+        effective = 0 if max_codes_i >= max_possible else max_codes_i
+        if use_cache:
+            self._effective_max_codes_cache = effective
         return effective
 
-    def _estimate_candidates_per_query(self, top_lists: torch.Tensor, *, max_codes: int | None = None) -> torch.Tensor:
+    @staticmethod
+    def _budget_to_max_codes(candidate_budget: int, nprobe: int) -> int:
+        budget = int(candidate_budget)
+        if budget <= 0:
+            return 0
+        probe = max(1, int(nprobe))
+        return (budget + probe - 1) // probe
+
+    @staticmethod
+    def _min_positive(a: int, b: int) -> int:
+        if a <= 0:
+            return b
+        if b <= 0:
+            return a
+        return min(a, b)
+
+    def _distance_weights(self, distances: torch.Tensor) -> torch.Tensor:
+        if distances.numel() == 0:
+            return distances
+        dist = distances.to(torch.float32)
+        d_min = dist.min(dim=1, keepdim=True).values
+        d_med = dist.median(dim=1, keepdim=True).values
+        denom = (d_med - d_min).clamp_min(1e-6)
+        z = (dist - d_min) / denom
+        z = z.clamp(0.0, 8.0)
+        return torch.exp(-3.0 * z)
+
+    def _enforce_strict_budget(
+        self, alloc: torch.Tensor, *, budget: int, min_codes_per_list: int
+    ) -> torch.Tensor:
+        if alloc.numel() == 0:
+            return alloc
+        if min_codes_per_list <= 0:
+            totals = alloc.sum(dim=1, keepdim=True).clamp_min(1)
+            scale = torch.minimum(torch.ones_like(totals, dtype=torch.float32), budget / totals.to(torch.float32))
+            scaled = torch.floor(alloc.to(torch.float32) * scale).to(torch.long)
+            return scaled
+
+        alloc_cpu = alloc.to("cpu").tolist()
+        for i, row in enumerate(alloc_cpu):
+            total = int(sum(row))
+            if total <= budget:
+                continue
+            excess = total - budget
+            while excess > 0:
+                reducible = [max(0, v - min_codes_per_list) for v in row]
+                reducible_total = sum(reducible)
+                if reducible_total <= 0:
+                    break
+                for j, cap in enumerate(reducible):
+                    if cap <= 0:
+                        continue
+                    take = max(1, int(excess * cap / reducible_total))
+                    take = min(take, cap, excess)
+                    row[j] -= take
+                    excess -= take
+                    if excess <= 0:
+                        break
+            alloc_cpu[i] = row
+        return torch.tensor(alloc_cpu, dtype=torch.long, device=self.device)
+
+    def _allocate_candidate_sizes(
+        self, top_lists: torch.Tensor, top_scores: torch.Tensor, config: _ResolvedSearchConfig
+    ) -> torch.Tensor:
+        if top_lists.numel() == 0:
+            return torch.zeros_like(top_lists, dtype=torch.long)
+        if config.candidate_budget is None:
+            return torch.zeros_like(top_lists, dtype=torch.long)
+
+        list_sizes = self._get_list_sizes()
+        sizes = list_sizes[top_lists]
+        nprobe_user = max(1, min(config.nprobe, self._nlist))
+        max_codes_from_budget = (config.candidate_budget + nprobe_user - 1) // nprobe_user
+        max_codes_eff = self._min_positive(config.max_codes, max_codes_from_budget)
+        if max_codes_eff > 0:
+            sizes = torch.minimum(sizes, torch.full_like(sizes, max_codes_eff))
+        if config.max_codes_cap_per_list > 0:
+            sizes = torch.minimum(
+                sizes, torch.full_like(sizes, int(config.max_codes_cap_per_list))
+            )
+
+        min_codes = int(config.min_codes_per_list)
+        if config.budget_strategy == "uniform":
+            base = (config.candidate_budget + nprobe_user - 1) // nprobe_user
+            alloc = torch.full_like(sizes, int(base))
+            alloc = torch.minimum(alloc, sizes)
+            if min_codes > 0:
+                min_alloc = torch.minimum(sizes, torch.full_like(sizes, min_codes))
+                alloc = torch.maximum(alloc, min_alloc)
+        else:
+            weights = self._distance_weights(top_scores)
+            if weights.numel() == 0:
+                alloc = torch.zeros_like(sizes)
+            else:
+                weight_sum = weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                alloc = torch.round(
+                    weights * (float(config.candidate_budget) / weight_sum)
+                ).to(torch.long)
+                alloc = torch.minimum(alloc, sizes)
+                if min_codes > 0:
+                    min_alloc = torch.minimum(sizes, torch.full_like(sizes, min_codes))
+                    alloc = torch.maximum(alloc, min_alloc)
+
+            if config.dynamic_nprobe and weights.numel() > 0:
+                order = torch.argsort(weights, dim=1, descending=True)
+                weights_sorted = torch.gather(weights, 1, order)
+                caps_sorted = torch.gather(sizes, 1, order)
+                if min_codes > 0:
+                    min_alloc = torch.minimum(caps_sorted, torch.full_like(caps_sorted, min_codes))
+                    cum_min = torch.cumsum(min_alloc, dim=1)
+                    active = cum_min <= config.candidate_budget
+                    if config.candidate_budget > 0:
+                        active[:, 0] = True
+                    min_alloc = torch.where(active, min_alloc, torch.zeros_like(min_alloc))
+                    if config.candidate_budget > 0:
+                        min_alloc[:, 0] = torch.minimum(
+                            min_alloc[:, 0], torch.full_like(min_alloc[:, 0], config.candidate_budget)
+                        )
+                    remaining = config.candidate_budget - min_alloc.sum(dim=1)
+                else:
+                    active = torch.ones_like(caps_sorted, dtype=torch.bool)
+                    min_alloc = torch.zeros_like(caps_sorted)
+                    remaining = torch.full(
+                        (weights.shape[0],), config.candidate_budget, dtype=torch.long, device=self.device
+                    )
+                remaining = remaining.clamp_min(0)
+                w_active = torch.where(active, weights_sorted, torch.zeros_like(weights_sorted))
+                w_sum = w_active.sum(dim=1, keepdim=True)
+                denom = w_sum.clamp_min(1e-6)
+                extra = torch.round(remaining.to(torch.float32).unsqueeze(1) * w_active / denom).to(torch.long)
+                extra = torch.where(w_sum > 0, extra, torch.zeros_like(extra))
+                alloc_sorted = torch.minimum(min_alloc + extra, caps_sorted)
+                alloc = torch.zeros_like(alloc_sorted)
+                alloc.scatter_(1, order, alloc_sorted)
+
+        if config.strict_budget:
+            alloc = self._enforce_strict_budget(
+                alloc, budget=int(config.candidate_budget), min_codes_per_list=min_codes
+            )
+
+        if config.candidate_budget > 0:
+            total = alloc.sum(dim=1)
+            empty = total == 0
+            if empty.any():
+                first_caps = sizes[empty, 0]
+                alloc[empty, 0] = torch.minimum(
+                    torch.ones_like(first_caps, dtype=torch.long), first_caps
+                )
+
+        return alloc
+
+    def _estimate_candidates_per_query(
+        self,
+        top_lists: torch.Tensor,
+        *,
+        max_codes: int | None = None,
+        per_list_sizes: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if top_lists.numel() == 0:
             return torch.zeros(top_lists.shape[0], dtype=torch.long, device=self.device)
+        if per_list_sizes is not None:
+            return per_list_sizes.sum(dim=1)
         sizes = self._get_list_sizes()
         per_probe = sizes[top_lists]
         counts = per_probe.sum(dim=1)
@@ -582,8 +1048,106 @@ class IndexIVFFlat(IndexBase):
             counts = torch.minimum(counts, torch.full_like(counts, max_codes_i))
         return counts
 
+    def _sum_read_codes_for_chunk(
+        self,
+        top_lists: torch.Tensor,
+        *,
+        max_codes: int,
+        per_list_sizes: torch.Tensor | None,
+    ) -> int:
+        if top_lists.numel() == 0:
+            return 0
+        sizes = self._get_list_sizes()[top_lists]
+        if per_list_sizes is not None:
+            sizes = torch.minimum(sizes, per_list_sizes)
+        else:
+            max_codes_i = int(max_codes)
+            if max_codes_i > 0:
+                cum = torch.cumsum(sizes, dim=1)
+                keep = cum <= max_codes_i
+                keep[:, 0] = True
+                sizes = sizes * keep
+        return int(sizes.sum().item())
+
+    def _update_csr_debug_stats(
+        self,
+        debug_stats: dict[str, float | int | str] | None,
+        *,
+        top_lists: torch.Tensor,
+        max_codes: int,
+        per_list_sizes: torch.Tensor | None,
+        tasks_total: int | None,
+        groups: torch.Tensor | None,
+    ) -> None:
+        if debug_stats is None:
+            return
+        sum_read = self._sum_read_codes_for_chunk(
+            top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
+        )
+        debug_stats["sum_read_codes"] = int(debug_stats.get("sum_read_codes", 0)) + int(sum_read)
+
+        if top_lists.numel():
+            list_sizes = self._get_list_sizes()[top_lists]
+            if per_list_sizes is not None:
+                list_sizes = torch.minimum(list_sizes, per_list_sizes)
+            max_list_len = int(list_sizes.max().item()) if list_sizes.numel() else 0
+            debug_stats["max_list_len"] = max(
+                int(debug_stats.get("max_list_len", 0)), int(max_list_len)
+            )
+
+        if tasks_total is not None:
+            debug_stats["tasks_total"] = int(debug_stats.get("tasks_total", 0)) + int(tasks_total)
+
+        if groups is not None and groups.numel():
+            group_sizes = groups[:, 2] - groups[:, 1]
+            max_group = int(group_sizes.max().item()) if group_sizes.numel() else 0
+            debug_stats["max_group_size"] = max(
+                int(debug_stats.get("max_group_size", 0)), int(max_group)
+            )
+            debug_stats["unique_lists_in_chunk"] = max(
+                int(debug_stats.get("unique_lists_in_chunk", 0)), int(groups.shape[0])
+            )
+
+    def _group_task_max_sizes(
+        self, task_sizes: torch.Tensor, groups: torch.Tensor
+    ) -> torch.Tensor:
+        if groups.numel() == 0:
+            return torch.zeros((0,), dtype=torch.long, device=self.device)
+        if task_sizes.numel() == 0:
+            return torch.zeros((groups.shape[0],), dtype=torch.long, device=self.device)
+        counts = (groups[:, 2] - groups[:, 1]).to(torch.long)
+        group_ids = torch.repeat_interleave(
+            torch.arange(groups.shape[0], device=self.device), counts
+        )
+        if group_ids.numel() == 0:
+            return torch.zeros((groups.shape[0],), dtype=torch.long, device=self.device)
+        group_max = torch.zeros(
+            (groups.shape[0],), dtype=task_sizes.dtype, device=self.device
+        )
+        group_max.scatter_reduce_(0, group_ids, task_sizes, reduce="amax", include_self=False)
+        return group_max
+
+    def _csr_groups_cpu(
+        self,
+        groups: torch.Tensor,
+        task_sizes: torch.Tensor | None,
+    ) -> list[list[int]]:
+        if groups.numel() == 0:
+            return []
+        if task_sizes is None:
+            pad = torch.zeros((groups.shape[0], 1), dtype=groups.dtype, device=groups.device)
+            return torch.cat([groups, pad], dim=1).to("cpu").tolist()
+        group_max = self._group_task_max_sizes(task_sizes, groups)
+        return torch.cat([groups, group_max.unsqueeze(1)], dim=1).to("cpu").tolist()
+
     def _build_candidate_index_matrix_from_lists(
-        self, top_lists: torch.Tensor, *, max_candidates: int, pos_1d: torch.Tensor, max_codes: int | None = None
+        self,
+        top_lists: torch.Tensor,
+        *,
+        max_candidates: int,
+        pos_1d: torch.Tensor,
+        max_codes: int | None = None,
+        per_list_sizes: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         chunk = top_lists.shape[0]
         if chunk == 0 or top_lists.numel() == 0:
@@ -603,12 +1167,15 @@ class IndexIVFFlat(IndexBase):
         starts = self._list_offsets[flat_lists]
         ends = self._list_offsets[flat_lists + 1]
         sizes = (ends - starts).reshape(chunk, probe)
-        max_codes_i = self._max_codes if max_codes is None else int(max_codes)
-        if max_codes_i:
-            budget = torch.full((chunk, 1), max_codes_i, dtype=torch.long, device=self.device)
-            prev_cum = torch.cumsum(sizes, dim=1) - sizes
-            remaining = (budget - prev_cum).clamp_min(0)
-            sizes = torch.minimum(sizes, remaining)
+        if per_list_sizes is not None:
+            sizes = torch.minimum(sizes, per_list_sizes)
+        else:
+            max_codes_i = self._max_codes if max_codes is None else int(max_codes)
+            if max_codes_i:
+                budget = torch.full((chunk, 1), max_codes_i, dtype=torch.long, device=self.device)
+                prev_cum = torch.cumsum(sizes, dim=1) - sizes
+                remaining = (budget - prev_cum).clamp_min(0)
+                sizes = torch.minimum(sizes, remaining)
         query_counts = sizes.sum(dim=1)
         starts2d = starts.reshape(chunk, probe)
         cum = torch.cumsum(sizes, dim=1)
@@ -624,7 +1191,11 @@ class IndexIVFFlat(IndexBase):
         return index_matrix, query_counts
 
     def _build_tasks_from_lists(
-        self, top_lists: torch.Tensor, *, max_codes: int | None = None
+        self,
+        top_lists: torch.Tensor,
+        *,
+        max_codes: int | None = None,
+        per_list_sizes: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if top_lists.numel() == 0:
             empty = torch.empty(0, dtype=torch.long, device=self.device)
@@ -632,14 +1203,17 @@ class IndexIVFFlat(IndexBase):
 
         b, probe = top_lists.shape
         sizes = self._get_list_sizes()[top_lists]
-
-        max_codes_i = self._max_codes if max_codes is None else int(max_codes)
-        if max_codes_i:
-            cum = torch.cumsum(sizes, dim=1)
-            keep = cum <= max_codes_i
-            keep[:, 0] = True
+        if per_list_sizes is not None:
+            sizes = torch.minimum(sizes, per_list_sizes)
+            keep = sizes > 0
         else:
-            keep = torch.ones_like(top_lists, dtype=torch.bool)
+            max_codes_i = self._max_codes if max_codes is None else int(max_codes)
+            if max_codes_i:
+                cum = torch.cumsum(sizes, dim=1)
+                keep = cum <= max_codes_i
+                keep[:, 0] = True
+            else:
+                keep = torch.ones_like(top_lists, dtype=torch.bool)
 
         q_idx = torch.arange(b, dtype=torch.long, device=self.device).unsqueeze(1).expand(-1, probe)
         tasks_l = top_lists[keep].to(torch.long)
@@ -658,7 +1232,11 @@ class IndexIVFFlat(IndexBase):
         return tasks_q, tasks_l, groups
 
     def _build_tasks_from_lists_with_probe(
-        self, top_lists: torch.Tensor, *, max_codes: int | None = None
+        self,
+        top_lists: torch.Tensor,
+        *,
+        max_codes: int | None = None,
+        per_list_sizes: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if top_lists.numel() == 0:
             empty = torch.empty(0, dtype=torch.long, device=self.device)
@@ -666,14 +1244,17 @@ class IndexIVFFlat(IndexBase):
 
         b, probe = top_lists.shape
         sizes = self._get_list_sizes()[top_lists]
-
-        max_codes_i = self._max_codes if max_codes is None else int(max_codes)
-        if max_codes_i:
-            cum = torch.cumsum(sizes, dim=1)
-            keep = cum <= max_codes_i
-            keep[:, 0] = True
+        if per_list_sizes is not None:
+            sizes = torch.minimum(sizes, per_list_sizes)
+            keep = sizes > 0
         else:
-            keep = torch.ones_like(top_lists, dtype=torch.bool)
+            max_codes_i = self._max_codes if max_codes is None else int(max_codes)
+            if max_codes_i:
+                cum = torch.cumsum(sizes, dim=1)
+                keep = cum <= max_codes_i
+                keep[:, 0] = True
+            else:
+                keep = torch.ones_like(top_lists, dtype=torch.bool)
 
         q_idx = torch.arange(b, dtype=torch.long, device=self.device).unsqueeze(1).expand(-1, probe)
         p_idx = torch.arange(probe, dtype=torch.long, device=self.device).unsqueeze(0).expand(b, -1)
@@ -714,9 +1295,26 @@ class IndexIVFFlat(IndexBase):
         best_scores.index_copy_(0, query_ids, new_scores)
         best_idx.index_copy_(0, query_ids, new_idx)
 
-    def _search_csr_online(self, xq: torch.Tensor, k: int, *, max_codes: int) -> tuple[torch.Tensor, torch.Tensor]:
-        top_lists = self._top_probed_lists(xq)
-        chunks = self._iter_query_chunks_csr(xq.shape[0])
+    def _search_csr_online(
+        self,
+        xq: torch.Tensor,
+        k: int,
+        *,
+        max_codes: int,
+        nprobe: int,
+        top_lists: torch.Tensor | None = None,
+        per_list_sizes: torch.Tensor | None = None,
+        debug_stats: dict[str, float | int | str] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if top_lists is None:
+            top_lists = self._top_probed_lists(xq, nprobe=nprobe)
+        chunks = self._iter_query_chunks_csr(xq.shape[0], nprobe=nprobe)
+        if debug_stats is not None:
+            debug_stats["chunks"] = int(len(chunks))
+            counts = self._estimate_candidates_per_query(
+                top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
+            )
+            debug_stats["total_candidates_est"] = int(counts.sum().item())
 
         dists = torch.empty((xq.shape[0], k), dtype=self.dtype, device=self.device)
         labels = torch.empty((xq.shape[0], k), dtype=torch.long, device=self.device)
@@ -724,13 +1322,28 @@ class IndexIVFFlat(IndexBase):
         for start, end in chunks:
             chunk_q = xq[start:end]
             chunk_lists = top_lists[start:end]
-            chunk_dists, chunk_labels = self._search_csr_online_chunk(chunk_q, chunk_lists, k, max_codes=max_codes)
+            chunk_sizes = per_list_sizes[start:end] if per_list_sizes is not None else None
+            chunk_dists, chunk_labels = self._search_csr_online_chunk(
+                chunk_q,
+                chunk_lists,
+                k,
+                max_codes=max_codes,
+                per_list_sizes=chunk_sizes,
+                debug_stats=debug_stats,
+            )
             dists[start:end] = chunk_dists
             labels[start:end] = chunk_labels
         return dists, labels
 
     def _search_csr_online_chunk(
-        self, xq_chunk: torch.Tensor, top_lists: torch.Tensor, k: int, *, max_codes: int
+        self,
+        xq_chunk: torch.Tensor,
+        top_lists: torch.Tensor,
+        k: int,
+        *,
+        max_codes: int,
+        per_list_sizes: torch.Tensor | None = None,
+        debug_stats: dict[str, float | int | str] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         chunk_size = xq_chunk.shape[0]
         largest = self.metric == "ip"
@@ -752,7 +1365,9 @@ class IndexIVFFlat(IndexBase):
 
         avg_group_size = (chunk_size * top_lists.shape[1]) / max(1, self._nlist)
         if avg_group_size < self._csr_small_batch_avg_group_threshold:
-            query_counts = self._estimate_candidates_per_query(top_lists, max_codes=max_codes)
+            query_counts = self._estimate_candidates_per_query(
+                top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
+            )
             max_candidates = int(query_counts.max().item()) if query_counts.numel() else 0
             if max_candidates > 0 and (chunk_size * max_candidates) <= self._candidate_budget():
                 pos_1d = torch.arange(max_candidates, dtype=torch.long, device=self.device)
@@ -761,19 +1376,56 @@ class IndexIVFFlat(IndexBase):
                     max_candidates=max_candidates,
                     pos_1d=pos_1d,
                     max_codes=max_codes,
+                    per_list_sizes=per_list_sizes,
                 )
+                if debug_stats is not None:
+                    debug_stats["matrix_fallback"] = int(debug_stats.get("matrix_fallback", 0)) + 1
+                    self._update_csr_debug_stats(
+                        debug_stats,
+                        top_lists=top_lists,
+                        max_codes=max_codes,
+                        per_list_sizes=per_list_sizes,
+                        tasks_total=None,
+                        groups=None,
+                    )
                 return self._search_from_index_matrix(q, index_matrix, query_counts, k)
-            return self._search_csr_buffered_chunk(q, q2, top_lists, k, max_codes=max_codes)
+            return self._search_csr_buffered_chunk(
+                q,
+                q2,
+                top_lists,
+                k,
+                max_codes=max_codes,
+                per_list_sizes=per_list_sizes,
+                debug_stats=debug_stats,
+            )
 
-        tasks_q, _, groups = self._build_tasks_from_lists(top_lists, max_codes=max_codes)
+        if per_list_sizes is None:
+            tasks_q, _, groups = self._build_tasks_from_lists(top_lists, max_codes=max_codes)
+            tasks_p = None
+            task_sizes = None
+        else:
+            tasks_q, _, tasks_p, groups = self._build_tasks_from_lists_with_probe(
+                top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
+            )
+            task_sizes = per_list_sizes[tasks_q, tasks_p] if tasks_q.numel() else None
         if groups.numel() == 0:
             return best_scores, best_packed
 
         q_tasks = q.index_select(0, tasks_q)
         q2_tasks = q2.index_select(0, tasks_q) if q2 is not None else None
 
-        groups_cpu = groups.to("cpu").tolist()
-        for l, start, end in groups_cpu:
+        if debug_stats is not None:
+            self._update_csr_debug_stats(
+                debug_stats,
+                top_lists=top_lists,
+                max_codes=max_codes,
+                per_list_sizes=per_list_sizes,
+                tasks_total=int(tasks_q.numel()),
+                groups=groups,
+            )
+            debug_stats["list_groups"] = int(debug_stats.get("list_groups", 0)) + int(groups.shape[0])
+        groups_cpu = self._csr_groups_cpu(groups, task_sizes)
+        for l, start, end, max_len in groups_cpu:
             a = int(self._list_offsets_cpu[int(l)])
             b = int(self._list_offsets_cpu[int(l) + 1])
             if b <= a:
@@ -781,6 +1433,20 @@ class IndexIVFFlat(IndexBase):
             query_ids = tasks_q[int(start) : int(end)]
             if query_ids.numel() == 0:
                 continue
+            if task_sizes is not None:
+                group_sizes = task_sizes[int(start) : int(end)]
+                if group_sizes.numel() == 0:
+                    continue
+                if max_len <= 0:
+                    continue
+                list_len = b - a
+                if max_len < list_len:
+                    b = a + max_len
+                else:
+                    max_len = list_len
+            else:
+                group_sizes = None
+                max_len = b - a
 
             qg = q_tasks[int(start) : int(end)]
             if q2 is not None:
@@ -791,11 +1457,24 @@ class IndexIVFFlat(IndexBase):
             vec_chunk = self._csr_vec_chunk(buffered=False)
             if (b - a) <= vec_chunk:
                 x = self._packed_embeddings[a:b]
+                if debug_stats is not None:
+                    debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
+                    debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
+                    debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
+                        qg.shape[0]
+                    )
+                    debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
+                        x.shape[0]
+                    )
                 prod = torch.matmul(qg, x.transpose(0, 1))
                 if self.metric == "l2":
                     x2 = self._packed_norms[a:b]
                     dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
                     dist = dist.clamp_min_(0)
+                    if group_sizes is not None:
+                        pos = torch.arange(max_len, device=self.device)
+                        mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
+                        dist.masked_fill_(mask, float("inf"))
                     topk = min(k, dist.shape[1])
                     cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1)
                 else:
@@ -828,11 +1507,24 @@ class IndexIVFFlat(IndexBase):
                     x = self._packed_embeddings[p:pe]
                     if x.numel() == 0:
                         continue
+                    if debug_stats is not None:
+                        debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
+                        debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
+                        debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
+                            qg.shape[0]
+                        )
+                        debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
+                            x.shape[0]
+                        )
                     prod = torch.matmul(qg, x.transpose(0, 1))
                     if self.metric == "l2":
                         x2 = self._packed_norms[p:pe]
                         dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
                         dist = dist.clamp_min_(0)
+                        if group_sizes is not None:
+                            pos = torch.arange(p - a, pe - a, device=self.device)
+                            mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
+                            dist.masked_fill_(mask, float("inf"))
                         topk = min(k, dist.shape[1])
                         cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1)
                     else:
@@ -868,6 +1560,8 @@ class IndexIVFFlat(IndexBase):
         k: int,
         *,
         max_codes: int,
+        per_list_sizes: torch.Tensor | None = None,
+        debug_stats: dict[str, float | int | str] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         chunk_size = q.shape[0]
         probe = top_lists.shape[1]
@@ -884,7 +1578,9 @@ class IndexIVFFlat(IndexBase):
             best_ids.fill_(-1)
             return best_scores, best_ids
 
-        tasks_q, _, tasks_p, groups = self._build_tasks_from_lists_with_probe(top_lists, max_codes=max_codes)
+        tasks_q, _, tasks_p, groups = self._build_tasks_from_lists_with_probe(
+            top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
+        )
         if groups.numel() == 0:
             best_scores = self._workspace.ensure(
                 "csr_buf_best_scores", (chunk_size, k), dtype=self.dtype, device=self.device
@@ -904,10 +1600,20 @@ class IndexIVFFlat(IndexBase):
 
         q_tasks = q.index_select(0, tasks_q)
         q2_tasks = q2.index_select(0, tasks_q) if q2 is not None else None
+        task_sizes = per_list_sizes[tasks_q, tasks_p] if per_list_sizes is not None else None
 
-        groups_cpu = groups.to("cpu").tolist()
+        if debug_stats is not None:
+            self._update_csr_debug_stats(
+                debug_stats,
+                top_lists=top_lists,
+                max_codes=max_codes,
+                per_list_sizes=per_list_sizes,
+                tasks_total=int(tasks_q.numel()),
+                groups=groups,
+            )
+        groups_cpu = self._csr_groups_cpu(groups, task_sizes)
         vec_chunk = self._csr_vec_chunk(buffered=True)
-        for l, start, end in groups_cpu:
+        for l, start, end, max_len in groups_cpu:
             a = int(self._list_offsets_cpu[int(l)])
             b = int(self._list_offsets_cpu[int(l) + 1])
             if b <= a:
@@ -922,9 +1628,32 @@ class IndexIVFFlat(IndexBase):
                 q2g = q2_tasks[s:e].unsqueeze(1)
             else:
                 q2g = None
+            if task_sizes is not None:
+                group_sizes = task_sizes[s:e]
+                if group_sizes.numel() == 0:
+                    continue
+                if max_len <= 0:
+                    continue
+                list_len = b - a
+                if max_len < list_len:
+                    b = a + max_len
+                else:
+                    max_len = list_len
+            else:
+                group_sizes = None
+                max_len = b - a
 
             if (b - a) <= vec_chunk:
                 x = self._packed_embeddings[a:b]
+                if debug_stats is not None:
+                    debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
+                    debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
+                    debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
+                        qg.shape[0]
+                    )
+                    debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
+                        x.shape[0]
+                    )
                 prod = torch.matmul(qg, x.transpose(0, 1))
                 if self.metric == "l2":
                     x2 = self._packed_norms[a:b]
@@ -963,11 +1692,24 @@ class IndexIVFFlat(IndexBase):
                     x = self._packed_embeddings[p:pe]
                     if x.numel() == 0:
                         continue
+                    if debug_stats is not None:
+                        debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
+                        debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
+                        debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
+                            qg.shape[0]
+                        )
+                        debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
+                            x.shape[0]
+                        )
                     prod = torch.matmul(qg, x.transpose(0, 1))
                     if self.metric == "l2":
                         x2 = self._packed_norms[p:pe]
                         dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
                         dist = dist.clamp_min_(0)
+                        if group_sizes is not None:
+                            pos = torch.arange(p - a, pe - a, device=self.device)
+                            mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
+                            dist.masked_fill_(mask, float("inf"))
                         topk = min(k, dist.shape[1])
                         cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1)
                     else:
@@ -1034,11 +1776,11 @@ class IndexIVFFlat(IndexBase):
         bytes_per_vec = self._bytes_per_vector()
         return max(1, int(target_bytes // bytes_per_vec))
 
-    def _iter_query_chunks_csr(self, nq: int) -> list[tuple[int, int]]:
+    def _iter_query_chunks_csr(self, nq: int, *, nprobe: int) -> list[tuple[int, int]]:
         if nq <= 0:
             return [(0, 0)]
         budget = self._csr_task_budget()
-        probe = max(1, min(self._nprobe, self._nlist))
+        probe = max(1, min(int(nprobe), self._nlist))
         chunk = max(1, budget // probe)
         chunk = min(chunk, nq)
         return [(i, min(nq, i + chunk)) for i in range(0, nq, chunk)]

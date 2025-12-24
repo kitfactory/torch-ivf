@@ -1,7 +1,6 @@
-"""max_codes のスイープベンチ（torch-ivf GPU / faiss-cpu）。
+"""candidate_budget のスイープベンチ（torch-ivf GPU）。
 
-Benchmark sweep over max_codes for torch-ivf (GPU) and faiss-cpu.
-PatchCore/SPADE のような用途で、Faiss互換 `max_codes` の速度/精度トレードオフを把握する。
+Benchmark sweep over candidate_budget for torch-ivf (GPU).
 """
 
 from __future__ import annotations
@@ -14,15 +13,14 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
-import faiss
 import numpy as np
 import torch
 
-from torch_ivf.index import IndexIVFFlat
+from torch_ivf.index import IndexIVFFlat, SearchParams
 
 
 @dataclass
-class SweepResult:
+class CandidateBudgetSweepResult:
     library: str
     device: str
     device_name: str
@@ -36,6 +34,13 @@ class SweepResult:
     nlist: int
     nprobe: int
     max_codes: int
+    candidate_budget: int
+    budget_strategy: str
+    list_ordering: str | None
+    dynamic_nprobe: bool
+    min_codes_per_list: int
+    max_codes_cap_per_list: int
+    strict_budget: bool
     topk: int
     dtype: str
     warmup: int
@@ -55,7 +60,7 @@ class SweepResult:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Sweep max_codes for torch-ivf GPU and faiss-cpu.")
+    p = argparse.ArgumentParser(description="Sweep candidate_budget for torch-ivf GPU.")
     p.add_argument("--dim", type=int, default=128)
     p.add_argument("--nb", type=int, default=262144)
     p.add_argument("--train-n", type=int, default=20480)
@@ -68,16 +73,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--repeat", type=int, default=5)
+    p.add_argument("--max-codes", type=int, default=0)
     p.add_argument(
-        "--max-codes-list",
-        default="0,16384,32768,65536,131072",
-        help="comma separated max_codes values (0=unlimited)",
+        "--candidate-budgets",
+        default="16384,32768,65536,131072",
+        help="comma separated candidate_budget values",
     )
+    p.add_argument(
+        "--budget-strategy",
+        choices=["uniform", "distance_weighted"],
+        default="distance_weighted",
+    )
+    p.add_argument(
+        "--list-ordering",
+        choices=["residual_norm_asc", "none"],
+        default="residual_norm_asc",
+    )
+    p.add_argument("--dynamic-nprobe", action="store_true")
+    p.add_argument("--min-codes-per-list", type=int, default=0)
+    p.add_argument("--max-codes-cap-per-list", type=int, default=0)
+    p.add_argument("--strict-budget", action="store_true")
     p.add_argument("--torch-device", default="cuda", help="torch device string (default: cuda)")
-    p.add_argument("--torch-search-mode", choices=["matrix", "csr", "auto"], default="matrix")
+    p.add_argument("--torch-search-mode", choices=["matrix", "csr", "auto"], default="csr")
     p.add_argument("--jsonl", default="benchmarks/benchmarks.jsonl", help="append results to this JSONL file")
     p.add_argument("--json", action="store_true", help="print JSON only (still appends to --jsonl)")
-    p.add_argument("--skip-faiss", action="store_true", help="skip faiss-cpu benchmark")
     return p.parse_args()
 
 
@@ -115,48 +134,45 @@ def _recall_at_k_vs_unlimited(base_I: np.ndarray, test_I: np.ndarray) -> float:
     return float(per_q.mean())
 
 
-def _parse_max_codes_list(text: str) -> list[int]:
+def _parse_int_list(text: str) -> list[int]:
     out: list[int] = []
     for part in text.split(","):
         part = part.strip()
         if not part:
             continue
-        out.append(int(part))
+        value = int(part)
+        if value > 0:
+            out.append(value)
     if not out:
-        out = [0]
+        out = [16384, 32768, 65536, 131072]
     return out
 
 
-def _time_torch_search(index: IndexIVFFlat, xq: torch.Tensor, k: int, *, warmup: int, repeat: int) -> tuple[float, float]:
+def _time_torch_search(
+    index: IndexIVFFlat, xq: torch.Tensor, k: int, *, warmup: int, repeat: int, params: SearchParams
+) -> tuple[float, float, torch.Tensor]:
     device = xq.device
     for _ in range(warmup):
-        index.search(xq, k)
+        index.search(xq, k, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
     times_ms: list[float] = []
+    out_labels = None
     for _ in range(repeat):
         t0 = time.perf_counter()
-        index.search(xq, k)
+        _, labels = index.search(xq, k, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         times_ms.append((time.perf_counter() - t0) * 1000)
-    return float(statistics.median(times_ms)), float(min(times_ms))
-
-
-def _time_faiss_search(index, xq: np.ndarray, k: int, *, warmup: int, repeat: int) -> tuple[float, float]:
-    for _ in range(warmup):
-        index.search(xq, k)
-    times_ms: list[float] = []
-    for _ in range(repeat):
-        t0 = time.perf_counter()
-        index.search(xq, k)
-        times_ms.append((time.perf_counter() - t0) * 1000)
-    return float(statistics.median(times_ms)), float(min(times_ms))
+        out_labels = labels
+    if out_labels is None:
+        out_labels = torch.empty((xq.shape[0], k), dtype=torch.long, device=xq.device)
+    return float(statistics.median(times_ms)), float(min(times_ms)), out_labels
 
 
 def main() -> None:
     args = parse_args()
-    max_codes_list = _parse_max_codes_list(args.max_codes_list)
+    candidate_budgets = _parse_int_list(args.candidate_budgets)
     warmup = max(0, int(args.warmup))
     repeat = max(1, int(args.repeat))
 
@@ -164,14 +180,13 @@ def main() -> None:
     base_np = rng.standard_normal((args.nb, args.dim), dtype=np.float32)
     queries_np = rng.standard_normal((args.nq, args.dim), dtype=np.float32)
     train_n = max(1, min(args.nb, int(args.train_n)))
-    train_np = base_np[:train_n]
 
-    # Build torch-ivf once (max_codes affects only search).
     torch_device = torch.device(args.torch_device)
     xb = torch.from_numpy(base_np).to(torch_device)
     xq = torch.from_numpy(queries_np).to(torch_device)
     train_x = xb[:train_n]
-    torch_index = IndexIVFFlat(
+
+    index = IndexIVFFlat(
         args.dim,
         metric=args.metric,
         nlist=args.nlist,
@@ -179,63 +194,60 @@ def main() -> None:
         device=torch_device,
         dtype=torch.float32,
     )
-    torch_index.search_mode = args.torch_search_mode
+    index.search_mode = args.torch_search_mode
+    index.max_codes = int(args.max_codes)
+
     t0 = time.perf_counter()
-    torch_index.train(train_x, generator=torch.Generator(device="cpu").manual_seed(args.seed + 1))
+    index.train(train_x, generator=torch.Generator(device="cpu").manual_seed(args.seed + 1))
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)
     t1 = time.perf_counter()
-    torch_index.add(xb)
+    index.add(xb)
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)
     t2 = time.perf_counter()
-    torch_train_ms = (t1 - t0) * 1000
-    torch_add_ms = (t2 - t1) * 1000
+    train_ms = (t1 - t0) * 1000
+    add_ms = (t2 - t1) * 1000
 
-    torch_index.max_codes = 0
-    D0_torch, I0_torch = torch_index.search(xq, args.topk)
+    if args.list_ordering != "none":
+        index.rebuild_lists(ordering=args.list_ordering)
+
+    base_params = SearchParams(profile="exact", approximate=False)
+    _, base_labels = index.search(xq, args.topk, params=base_params)
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)
-    I0_torch_np = I0_torch.detach().to("cpu").numpy().astype(np.int64, copy=False)
+    base_labels_np = base_labels.detach().to("cpu").numpy().astype(np.int64, copy=False)
 
-    # Build faiss-cpu once.
-    faiss_index = None
-    faiss_train_ms = 0.0
-    faiss_add_ms = 0.0
-    I0_faiss = None
-    if not args.skip_faiss:
-        metric = faiss.METRIC_L2 if args.metric == "l2" else faiss.METRIC_INNER_PRODUCT
-        quantizer = faiss.IndexFlatL2(args.dim) if args.metric == "l2" else faiss.IndexFlatIP(args.dim)
-        faiss_index = faiss.IndexIVFFlat(quantizer, args.dim, args.nlist, metric)
-        t0 = time.perf_counter()
-        faiss_index.train(train_np)
-        t1 = time.perf_counter()
-        faiss_index.add(base_np)
-        t2 = time.perf_counter()
-        faiss_train_ms = (t1 - t0) * 1000
-        faiss_add_ms = (t2 - t1) * 1000
-        faiss_index.nprobe = int(args.nprobe)
-
-        faiss_index.max_codes = 0
-        _, I0_faiss = faiss_index.search(queries_np, args.topk)
-        I0_faiss = I0_faiss.astype(np.int64, copy=False)
-
-    records: list[SweepResult] = []
     now = datetime.now().isoformat(timespec="seconds")
     host_os = f"{platform.system()} {platform.release()}"
     host_cpu = platform.processor() or "unknown"
 
-    for max_codes in max_codes_list:
-        torch_index.max_codes = int(max_codes)
-        search_ms, search_ms_min = _time_torch_search(torch_index, xq, args.topk, warmup=warmup, repeat=repeat)
-        D_t, I_t = torch_index.search(xq, args.topk)
-        if torch_device.type == "cuda":
-            torch.cuda.synchronize(torch_device)
-        I_t_np = I_t.detach().to("cpu").numpy().astype(np.int64, copy=False)
-        recall_t = _recall_at_k_vs_unlimited(I0_torch_np, I_t_np)
-        qps_t = args.nq / (search_ms / 1000) if search_ms > 0 else float("inf")
+    records: list[CandidateBudgetSweepResult] = []
+    list_ordering = None if args.list_ordering == "none" else args.list_ordering
+
+    for budget in candidate_budgets:
+        params = SearchParams(
+            profile="approx",
+            approximate=True,
+            nprobe=args.nprobe,
+            max_codes=args.max_codes,
+            candidate_budget=budget,
+            budget_strategy=args.budget_strategy,
+            list_ordering=list_ordering,
+            rebuild_policy="manual",
+            dynamic_nprobe=args.dynamic_nprobe,
+            min_codes_per_list=args.min_codes_per_list,
+            max_codes_cap_per_list=args.max_codes_cap_per_list,
+            strict_budget=args.strict_budget,
+        )
+        search_ms, search_ms_min, labels = _time_torch_search(
+            index, xq, args.topk, warmup=warmup, repeat=repeat, params=params
+        )
+        labels_np = labels.detach().to("cpu").numpy().astype(np.int64, copy=False)
+        recall = _recall_at_k_vs_unlimited(base_labels_np, labels_np)
+        qps = args.nq / (search_ms / 1000) if search_ms > 0 else float("inf")
         records.append(
-            SweepResult(
+            CandidateBudgetSweepResult(
                 library="torch_ivf",
                 device=str(torch_device),
                 device_name=_device_name(torch_device),
@@ -248,60 +260,29 @@ def main() -> None:
                 nq=args.nq,
                 nlist=args.nlist,
                 nprobe=args.nprobe,
-                max_codes=int(max_codes),
+                max_codes=int(args.max_codes),
+                candidate_budget=int(budget),
+                budget_strategy=args.budget_strategy,
+                list_ordering=list_ordering,
+                dynamic_nprobe=bool(args.dynamic_nprobe),
+                min_codes_per_list=int(args.min_codes_per_list),
+                max_codes_cap_per_list=int(args.max_codes_cap_per_list),
+                strict_budget=bool(args.strict_budget),
                 topk=args.topk,
                 dtype=args.dtype,
                 warmup=warmup,
                 repeat=repeat,
-                train_ms=round(torch_train_ms, 3),
-                add_ms=round(torch_add_ms, 3),
+                train_ms=round(train_ms, 3),
+                add_ms=round(add_ms, 3),
                 search_ms=round(search_ms, 3),
                 search_ms_min=round(search_ms_min, 3),
-                qps=round(qps_t, 3),
-                recall_at_k_vs_unlimited=round(recall_t, 6),
+                qps=round(qps, 3),
+                recall_at_k_vs_unlimited=round(recall, 6),
                 timestamp=now,
                 host_os=host_os,
                 host_cpu=host_cpu,
             )
         )
-
-        if faiss_index is not None and I0_faiss is not None:
-            faiss_index.max_codes = int(max_codes)
-            search_ms, search_ms_min = _time_faiss_search(faiss_index, queries_np, args.topk, warmup=warmup, repeat=repeat)
-            _, I_f = faiss_index.search(queries_np, args.topk)
-            I_f = I_f.astype(np.int64, copy=False)
-            recall_f = _recall_at_k_vs_unlimited(I0_faiss, I_f)
-            qps_f = args.nq / (search_ms / 1000) if search_ms > 0 else float("inf")
-            records.append(
-                SweepResult(
-                    library="faiss_cpu",
-                    device="cpu",
-                    device_name=platform.processor() or "CPU",
-                    backend="faiss-cpu",
-                    search_mode="faiss",
-                    metric=args.metric,
-                    dim=args.dim,
-                    nb=args.nb,
-                    train_n=train_n,
-                    nq=args.nq,
-                    nlist=args.nlist,
-                    nprobe=args.nprobe,
-                    max_codes=int(max_codes),
-                    topk=args.topk,
-                    dtype=args.dtype,
-                    warmup=warmup,
-                    repeat=repeat,
-                    train_ms=round(faiss_train_ms, 3),
-                    add_ms=round(faiss_add_ms, 3),
-                    search_ms=round(search_ms, 3),
-                    search_ms_min=round(search_ms_min, 3),
-                    qps=round(qps_f, 3),
-                    recall_at_k_vs_unlimited=round(recall_f, 6),
-                    timestamp=now,
-                    host_os=host_os,
-                    host_cpu=host_cpu,
-                )
-            )
 
     with open(args.jsonl, "a", encoding="utf-8") as f:
         for r in records:
