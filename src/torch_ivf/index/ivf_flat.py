@@ -1607,7 +1607,7 @@ class IndexIVFFlat(IndexBase):
                 else:
                     topk = min(k, prod.shape[1])
                     cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
-                cand_packed = (a + cand_j).to(torch.long)
+                cand_packed = a + cand_j
                 if topk < k:
                     pad_cols = k - topk
                     cand_scores = torch.cat(
@@ -1658,7 +1658,7 @@ class IndexIVFFlat(IndexBase):
                         topk = min(k, prod.shape[1])
                         cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
 
-                    cand_packed = (p + cand_j).to(torch.long)
+                    cand_packed = p + cand_j
                     if topk < k:
                         pad_cols = k - topk
                         cand_scores = torch.cat(
@@ -2012,23 +2012,27 @@ class IndexIVFFlat(IndexBase):
                     dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
                     dist = dist.clamp_min_(0)
                     topk = min(k, dist.shape[1])
-                    cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
+                    if topk < k:
+                        task_scores[s:e].fill_(fill)
+                        task_packed[s:e].fill_(-1)
+                        out_scores = task_scores[s:e, :topk]
+                        out_packed = task_packed[s:e, :topk]
+                    else:
+                        out_scores = task_scores[s:e]
+                        out_packed = task_packed[s:e]
+                    torch.topk(dist, topk, largest=False, dim=1, sorted=False, out=(out_scores, out_packed))
                 else:
                     topk = min(k, prod.shape[1])
-                    cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
-                cand_packed = (a + cand_j).to(torch.long)
-                if topk < k:
-                    pad_cols = k - topk
-                    cand_scores = torch.cat(
-                        [cand_scores, torch.full((qg.shape[0], pad_cols), fill, dtype=self.dtype, device=self.device)],
-                        dim=1,
-                    )
-                    cand_packed = torch.cat(
-                        [cand_packed, torch.full((qg.shape[0], pad_cols), -1, dtype=torch.long, device=self.device)],
-                        dim=1,
-                    )
-                task_scores[s:e] = cand_scores
-                task_packed[s:e] = cand_packed
+                    if topk < k:
+                        task_scores[s:e].fill_(fill)
+                        task_packed[s:e].fill_(-1)
+                        out_scores = task_scores[s:e, :topk]
+                        out_packed = task_packed[s:e, :topk]
+                    else:
+                        out_scores = task_scores[s:e]
+                        out_packed = task_packed[s:e]
+                    torch.topk(prod, topk, largest=True, dim=1, sorted=False, out=(out_scores, out_packed))
+                out_packed.add_(a)
             else:
                 local_best_scores = self._workspace.ensure(
                     "csr_buf_local_best_scores", (qg.shape[0], k), dtype=self.dtype, device=self.device
@@ -2068,7 +2072,7 @@ class IndexIVFFlat(IndexBase):
                         topk = min(k, prod.shape[1])
                         cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
 
-                    cand_packed = (p + cand_j).to(torch.long)
+                    cand_packed = p + cand_j
                     if topk < k:
                         pad_cols = k - topk
                         cand_scores = torch.cat(
