@@ -1930,9 +1930,10 @@ class IndexIVFFlat(IndexBase):
             best_ids.fill_(-1)
             return best_scores, best_ids
 
-        tasks_q, _, tasks_p, groups = self._build_tasks_from_lists_with_probe(
-            top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
-        )
+        with torch.autograd.profiler.record_function("CSR_BUF_BUILD_TASKS"):
+            tasks_q, _, tasks_p, groups = self._build_tasks_from_lists_with_probe(
+                top_lists, max_codes=max_codes, per_list_sizes=per_list_sizes
+            )
         if groups.numel() == 0:
             best_scores = self._workspace.ensure(
                 "csr_buf_best_scores", (chunk_size, k), dtype=self.dtype, device=self.device
@@ -1945,10 +1946,11 @@ class IndexIVFFlat(IndexBase):
             return best_scores, best_ids
 
         t = tasks_q.numel()
-        task_scores = self._workspace.ensure("csr_task_scores", (t, k), dtype=self.dtype, device=self.device)
-        task_scores.fill_(fill)
-        task_packed = self._workspace.ensure("csr_task_packed", (t, k), dtype=torch.long, device=self.device)
-        task_packed.fill_(-1)
+        with torch.autograd.profiler.record_function("CSR_BUF_TASK_INIT"):
+            task_scores = self._workspace.ensure("csr_task_scores", (t, k), dtype=self.dtype, device=self.device)
+            task_scores.fill_(fill)
+            task_packed = self._workspace.ensure("csr_task_packed", (t, k), dtype=torch.long, device=self.device)
+            task_packed.fill_(-1)
 
         q_tasks = q.index_select(0, tasks_q)
         q2_tasks = q2.index_select(0, tasks_q) if q2 is not None else None
@@ -1963,7 +1965,8 @@ class IndexIVFFlat(IndexBase):
                 tasks_total=int(tasks_q.numel()),
                 groups=groups,
             )
-        groups_cpu = self._csr_groups_cpu(groups, task_sizes)
+        with torch.autograd.profiler.record_function("CSR_BUF_GROUPS_CPU"):
+            groups_cpu = self._csr_groups_cpu(groups, task_sizes)
         vec_chunk = self._csr_vec_chunk(buffered=True)
         for l, start, end, max_len in groups_cpu:
             a = int(self._list_offsets_cpu[int(l)])
@@ -1996,58 +1999,8 @@ class IndexIVFFlat(IndexBase):
                 max_len = b - a
 
             if (b - a) <= vec_chunk:
-                x = self._packed_embeddings[a:b]
-                if debug_stats is not None:
-                    debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
-                    debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
-                    debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
-                        qg.shape[0]
-                    )
-                    debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
-                        x.shape[0]
-                    )
-                prod = torch.matmul(qg, x.transpose(0, 1))
-                if self.metric == "l2":
-                    x2 = self._packed_norms[a:b]
-                    dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
-                    dist = dist.clamp_min_(0)
-                    topk = min(k, dist.shape[1])
-                    if topk < k:
-                        task_scores[s:e].fill_(fill)
-                        task_packed[s:e].fill_(-1)
-                        out_scores = task_scores[s:e, :topk]
-                        out_packed = task_packed[s:e, :topk]
-                    else:
-                        out_scores = task_scores[s:e]
-                        out_packed = task_packed[s:e]
-                    torch.topk(dist, topk, largest=False, dim=1, sorted=False, out=(out_scores, out_packed))
-                else:
-                    topk = min(k, prod.shape[1])
-                    if topk < k:
-                        task_scores[s:e].fill_(fill)
-                        task_packed[s:e].fill_(-1)
-                        out_scores = task_scores[s:e, :topk]
-                        out_packed = task_packed[s:e, :topk]
-                    else:
-                        out_scores = task_scores[s:e]
-                        out_packed = task_packed[s:e]
-                    torch.topk(prod, topk, largest=True, dim=1, sorted=False, out=(out_scores, out_packed))
-                out_packed.add_(a)
-            else:
-                local_best_scores = self._workspace.ensure(
-                    "csr_buf_local_best_scores", (qg.shape[0], k), dtype=self.dtype, device=self.device
-                )
-                local_best_scores.fill_(fill)
-                local_best_packed = self._workspace.ensure(
-                    "csr_buf_local_best_packed", (qg.shape[0], k), dtype=torch.long, device=self.device
-                )
-                local_best_packed.fill_(-1)
-                local_query_ids = torch.arange(qg.shape[0], dtype=torch.long, device=self.device)
-                for p in range(a, b, vec_chunk):
-                    pe = min(b, p + vec_chunk)
-                    x = self._packed_embeddings[p:pe]
-                    if x.numel() == 0:
-                        continue
+                with torch.autograd.profiler.record_function("CSR_BUF_TOPK_SMALL"):
+                    x = self._packed_embeddings[a:b]
                     if debug_stats is not None:
                         debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
                         debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
@@ -2059,61 +2012,115 @@ class IndexIVFFlat(IndexBase):
                         )
                     prod = torch.matmul(qg, x.transpose(0, 1))
                     if self.metric == "l2":
-                        x2 = self._packed_norms[p:pe]
+                        x2 = self._packed_norms[a:b]
                         dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
                         dist = dist.clamp_min_(0)
-                        if group_sizes is not None:
-                            pos = torch.arange(p - a, pe - a, device=self.device)
-                            mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
-                            dist.masked_fill_(mask, float("inf"))
                         topk = min(k, dist.shape[1])
-                        cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
+                        if topk < k:
+                            task_scores[s:e].fill_(fill)
+                            task_packed[s:e].fill_(-1)
+                            out_scores = task_scores[s:e, :topk]
+                            out_packed = task_packed[s:e, :topk]
+                        else:
+                            out_scores = task_scores[s:e]
+                            out_packed = task_packed[s:e]
+                        torch.topk(dist, topk, largest=False, dim=1, sorted=False, out=(out_scores, out_packed))
                     else:
                         topk = min(k, prod.shape[1])
-                        cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
-
-                    cand_packed = p + cand_j
-                    if topk < k:
-                        pad_cols = k - topk
-                        cand_scores = torch.cat(
-                            [cand_scores, torch.full((qg.shape[0], pad_cols), fill, dtype=self.dtype, device=self.device)],
-                            dim=1,
-                        )
-                        cand_packed = torch.cat(
-                            [cand_packed, torch.full((qg.shape[0], pad_cols), -1, dtype=torch.long, device=self.device)],
-                            dim=1,
-                        )
-                    self._merge_topk(
-                        local_best_scores,
-                        local_best_packed,
-                        local_query_ids,
-                        cand_scores,
-                        cand_packed,
-                        k,
-                        largest=largest,
+                        if topk < k:
+                            task_scores[s:e].fill_(fill)
+                            task_packed[s:e].fill_(-1)
+                            out_scores = task_scores[s:e, :topk]
+                            out_packed = task_packed[s:e, :topk]
+                        else:
+                            out_scores = task_scores[s:e]
+                            out_packed = task_packed[s:e]
+                        torch.topk(prod, topk, largest=True, dim=1, sorted=False, out=(out_scores, out_packed))
+                    with torch.autograd.profiler.record_function("CSR_BUF_PACKED_OFFSET"):
+                        out_packed.add_(a)
+            else:
+                with torch.autograd.profiler.record_function("CSR_BUF_TOPK_CHUNKED"):
+                    local_best_scores = self._workspace.ensure(
+                        "csr_buf_local_best_scores", (qg.shape[0], k), dtype=self.dtype, device=self.device
                     )
-                task_scores[s:e] = local_best_scores
-                task_packed[s:e] = local_best_packed
+                    local_best_scores.fill_(fill)
+                    local_best_packed = self._workspace.ensure(
+                        "csr_buf_local_best_packed", (qg.shape[0], k), dtype=torch.long, device=self.device
+                    )
+                    local_best_packed.fill_(-1)
+                    local_query_ids = torch.arange(qg.shape[0], dtype=torch.long, device=self.device)
+                    for p in range(a, b, vec_chunk):
+                        pe = min(b, p + vec_chunk)
+                        x = self._packed_embeddings[p:pe]
+                        if x.numel() == 0:
+                            continue
+                        if debug_stats is not None:
+                            debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
+                            debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
+                            debug_stats["matmul_total_rows"] = int(debug_stats.get("matmul_total_rows", 0)) + int(
+                                qg.shape[0]
+                            )
+                            debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
+                                x.shape[0]
+                            )
+                        prod = torch.matmul(qg, x.transpose(0, 1))
+                        if self.metric == "l2":
+                            x2 = self._packed_norms[p:pe]
+                            dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
+                            dist = dist.clamp_min_(0)
+                            if group_sizes is not None:
+                                pos = torch.arange(p - a, pe - a, device=self.device)
+                                mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
+                                dist.masked_fill_(mask, float("inf"))
+                            topk = min(k, dist.shape[1])
+                            cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
+                        else:
+                            topk = min(k, prod.shape[1])
+                            cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
 
-        buf_scores = self._workspace.ensure(
-            "csr_buf_scores", (chunk_size * probe, k), dtype=self.dtype, device=self.device
-        )
-        buf_scores.fill_(fill)
-        buf_packed = self._workspace.ensure(
-            "csr_buf_packed", (chunk_size * probe, k), dtype=torch.long, device=self.device
-        )
-        buf_packed.fill_(-1)
-        linear = tasks_q * probe + tasks_p
-        buf_scores.index_copy_(0, linear, task_scores)
-        buf_packed.index_copy_(0, linear, task_packed)
+                        cand_packed = p + cand_j
+                        if topk < k:
+                            pad_cols = k - topk
+                            cand_scores = torch.cat(
+                                [cand_scores, torch.full((qg.shape[0], pad_cols), fill, dtype=self.dtype, device=self.device)],
+                                dim=1,
+                            )
+                            cand_packed = torch.cat(
+                                [cand_packed, torch.full((qg.shape[0], pad_cols), -1, dtype=torch.long, device=self.device)],
+                                dim=1,
+                            )
+                        self._merge_topk(
+                            local_best_scores,
+                            local_best_packed,
+                            local_query_ids,
+                            cand_scores,
+                            cand_packed,
+                            k,
+                            largest=largest,
+                        )
+                    task_scores[s:e] = local_best_scores
+                    task_packed[s:e] = local_best_packed
 
-        flat_scores = buf_scores.view(chunk_size, probe * k)
-        flat_packed = buf_packed.view(chunk_size, probe * k)
-        best_scores, pos = torch.topk(flat_scores, k, largest=largest, dim=1)
-        best_packed = torch.gather(flat_packed, 1, pos)
-        out_ids = self._list_ids.index_select(0, best_packed.clamp_min(0).reshape(-1)).reshape(best_packed.shape)
-        out_ids = torch.where(best_packed < 0, torch.full_like(out_ids, -1), out_ids)
-        return best_scores, out_ids
+        with torch.autograd.profiler.record_function("CSR_BUF_FINAL_MERGE"):
+            buf_scores = self._workspace.ensure(
+                "csr_buf_scores", (chunk_size * probe, k), dtype=self.dtype, device=self.device
+            )
+            buf_scores.fill_(fill)
+            buf_packed = self._workspace.ensure(
+                "csr_buf_packed", (chunk_size * probe, k), dtype=torch.long, device=self.device
+            )
+            buf_packed.fill_(-1)
+            linear = tasks_q * probe + tasks_p
+            buf_scores.index_copy_(0, linear, task_scores)
+            buf_packed.index_copy_(0, linear, task_packed)
+
+            flat_scores = buf_scores.view(chunk_size, probe * k)
+            flat_packed = buf_packed.view(chunk_size, probe * k)
+            best_scores, pos = torch.topk(flat_scores, k, largest=largest, dim=1)
+            best_packed = torch.gather(flat_packed, 1, pos)
+            out_ids = self._list_ids.index_select(0, best_packed.clamp_min(0).reshape(-1)).reshape(best_packed.shape)
+            out_ids = torch.where(best_packed < 0, torch.full_like(out_ids, -1), out_ids)
+            return best_scores, out_ids
 
     def _csr_list_block_size(self) -> int:
         if self.device.type == "cpu":
