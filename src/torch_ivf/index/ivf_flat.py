@@ -1255,14 +1255,17 @@ class IndexIVFFlat(IndexBase):
                 if tasks_l.numel() == 0:
                     empty = torch.empty(0, dtype=torch.long, device=self.device)
                     return empty, empty, empty
-                tasks_q = torch.arange(b, dtype=torch.long, device=self.device).repeat_interleave(probe)
+                idx = torch.arange(b * probe, dtype=torch.long, device=self.device)
+                tasks_q = idx // probe
                 perm = torch.argsort(tasks_l)
                 tasks_l = tasks_l[perm]
                 tasks_q = tasks_q[perm]
-                unique_l, counts = torch.unique_consecutive(tasks_l, return_counts=True)
+                counts = torch.zeros(self._nlist, dtype=torch.long, device=self.device)
+                counts.index_add_(0, tasks_l, torch.ones_like(tasks_l, dtype=torch.long))
                 starts = torch.cumsum(counts, dim=0) - counts
                 ends = starts + counts
-                groups = torch.stack([unique_l, starts, ends], dim=1)
+                list_ids = torch.arange(self._nlist, dtype=torch.long, device=self.device)
+                groups = torch.stack([list_ids, starts, ends], dim=1)
                 return tasks_q, tasks_l, groups
         sizes = self._get_list_sizes()[top_lists]
         if per_list_sizes is not None:
@@ -1314,16 +1317,19 @@ class IndexIVFFlat(IndexBase):
                 if tasks_l.numel() == 0:
                     empty = torch.empty(0, dtype=torch.long, device=self.device)
                     return empty, empty, empty, empty
-                tasks_q = torch.arange(b, dtype=torch.long, device=self.device).repeat_interleave(probe)
-                tasks_p = torch.arange(probe, dtype=torch.long, device=self.device).repeat(b)
+                idx = torch.arange(b * probe, dtype=torch.long, device=self.device)
+                tasks_q = idx // probe
+                tasks_p = idx - (tasks_q * probe)
                 perm = torch.argsort(tasks_l)
                 tasks_l = tasks_l[perm]
                 tasks_q = tasks_q[perm]
                 tasks_p = tasks_p[perm]
-                unique_l, counts = torch.unique_consecutive(tasks_l, return_counts=True)
+                counts = torch.zeros(self._nlist, dtype=torch.long, device=self.device)
+                counts.index_add_(0, tasks_l, torch.ones_like(tasks_l, dtype=torch.long))
                 starts = torch.cumsum(counts, dim=0) - counts
                 ends = starts + counts
-                groups = torch.stack([unique_l, starts, ends], dim=1)
+                list_ids = torch.arange(self._nlist, dtype=torch.long, device=self.device)
+                groups = torch.stack([list_ids, starts, ends], dim=1)
                 return tasks_q, tasks_l, tasks_p, groups
         sizes = self._get_list_sizes()[top_lists]
         if per_list_sizes is not None:
