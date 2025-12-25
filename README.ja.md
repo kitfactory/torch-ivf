@@ -69,8 +69,8 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 これらの条件でQPSを記載する場合は、パラメータも併記してください。
 - `max_codes`（例: `32768`）で候補数の上限を設定する。
 - `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")`（L2のみ）。
-candidate_budget?per_list??????????????fast=16,384 / balanced=65,536 / quality=131,072??? sweep ?????
-補足: 本環境の sweep では max_codes は throughput を改善しませんでした（max_codes=0 が最速）。速度/精度の調整はまず candidate_budget を推奨します。
+candidate_budget（per_list）は本環境での主要ノブです：fast=16,384 / balanced=65,536 / quality=131,072（下の sweep 表参照）。
+補足: 本環境では max_codes による throughput 改善は見られず（max_codes=0 が最速）、速度/品質調整はまず candidate_budget を推奨します。
 
 
 
