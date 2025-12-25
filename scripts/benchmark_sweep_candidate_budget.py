@@ -30,6 +30,7 @@ class CandidateBudgetSweepResult:
     auto_avg_group_size: float | None
     auto_threshold: float | None
     auto_search_avg_group_threshold: float | None
+    auto_enabled: int | None
     metric: str
     dim: int
     nb: int
@@ -241,7 +242,26 @@ def main() -> None:
             raise ValueError("per-list options require --budget-mode per_list.")
 
     for budget in candidate_budgets:
-        params = SearchParams(
+        params_perf = SearchParams(
+            profile="approx",
+            approximate=True,
+            nprobe=args.nprobe,
+            max_codes=args.max_codes,
+            candidate_budget=budget,
+            budget_strategy=args.budget_strategy,
+            list_ordering=list_ordering,
+            rebuild_policy="manual",
+            dynamic_nprobe=args.dynamic_nprobe,
+            min_codes_per_list=args.min_codes_per_list,
+            max_codes_cap_per_list=args.max_codes_cap_per_list,
+            strict_budget=args.strict_budget,
+            use_per_list_sizes=use_per_list_sizes,
+            debug_stats=False,
+        )
+        search_ms, search_ms_min, labels = _time_torch_search(
+            index, xq, args.topk, warmup=warmup, repeat=repeat, params=params_perf
+        )
+        params_debug = SearchParams(
             profile="approx",
             approximate=True,
             nprobe=args.nprobe,
@@ -257,9 +277,9 @@ def main() -> None:
             use_per_list_sizes=use_per_list_sizes,
             debug_stats=True,
         )
-        search_ms, search_ms_min, labels = _time_torch_search(
-            index, xq, args.topk, warmup=warmup, repeat=repeat, params=params
-        )
+        index.search(xq, args.topk, params=params_debug)
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
         stats = index.last_search_stats or {}
         chosen_mode = str(stats.get("chosen_mode", args.torch_search_mode))
         labels_np = labels.detach().to("cpu").numpy().astype(np.int64, copy=False)
@@ -276,6 +296,7 @@ def main() -> None:
                 auto_avg_group_size=stats.get("auto_avg_group_size"),
                 auto_threshold=stats.get("auto_threshold"),
                 auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
+                auto_enabled=stats.get("auto_enabled"),
                 metric=args.metric,
                 dim=args.dim,
                 nb=args.nb,

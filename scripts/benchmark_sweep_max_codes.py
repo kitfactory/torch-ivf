@@ -32,6 +32,7 @@ class SweepResult:
     auto_avg_group_size: float | None
     auto_threshold: float | None
     auto_search_avg_group_threshold: float | None
+    auto_enabled: int | None
     metric: str
     dim: int
     nb: int
@@ -245,20 +246,30 @@ def main() -> None:
 
     for max_codes in max_codes_list:
         torch_index.max_codes = int(max_codes)
-        params = SearchParams(
+        params_perf = SearchParams(
+            profile="speed",
+            approximate=torch_index.approximate_mode,
+            nprobe=torch_index.nprobe,
+            max_codes=torch_index.max_codes,
+            debug_stats=False,
+        )
+        search_ms, search_ms_min = _time_torch_search(
+            torch_index, xq, args.topk, warmup=warmup, repeat=repeat, params=params_perf
+        )
+        D_t, I_t = torch_index.search(xq, args.topk, params=params_perf)
+        if torch_device.type == "cuda":
+            torch.cuda.synchronize(torch_device)
+        I_t_np = I_t.detach().to("cpu").numpy().astype(np.int64, copy=False)
+        params_debug = SearchParams(
             profile="speed",
             approximate=torch_index.approximate_mode,
             nprobe=torch_index.nprobe,
             max_codes=torch_index.max_codes,
             debug_stats=True,
         )
-        search_ms, search_ms_min = _time_torch_search(
-            torch_index, xq, args.topk, warmup=warmup, repeat=repeat, params=params
-        )
-        D_t, I_t = torch_index.search(xq, args.topk, params=params)
+        torch_index.search(xq, args.topk, params=params_debug)
         if torch_device.type == "cuda":
             torch.cuda.synchronize(torch_device)
-        I_t_np = I_t.detach().to("cpu").numpy().astype(np.int64, copy=False)
         stats = torch_index.last_search_stats or {}
         chosen_mode = str(stats.get("chosen_mode", args.torch_search_mode))
         recall_t = _recall_at_k_vs_unlimited(I0_torch_np, I_t_np)
@@ -274,6 +285,7 @@ def main() -> None:
                 auto_avg_group_size=stats.get("auto_avg_group_size"),
                 auto_threshold=stats.get("auto_threshold"),
                 auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
+                auto_enabled=stats.get("auto_enabled"),
                 metric=args.metric,
                 dim=args.dim,
                 nb=args.nb,
@@ -316,6 +328,7 @@ def main() -> None:
                     auto_avg_group_size=None,
                     auto_threshold=None,
                     auto_search_avg_group_threshold=None,
+                    auto_enabled=None,
                     metric=args.metric,
                     dim=args.dim,
                     nb=args.nb,

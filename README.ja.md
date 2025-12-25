@@ -27,7 +27,7 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 | 速度チューニング | `nprobe` 等 | `nprobe` + `search_mode` + `max_codes` |
 
 **GPU 推奨設定**：`search_mode="auto"`（tiny-batch は軽い経路、throughput は `csr`）  
-切り替え基準: `avg_group_size = (nq * nprobe) / nlist`、`avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` なら `csr`（CUDA のみ）。
+切り替え基準: `probe = min(nprobe, nlist)`、`avg_group_size = (nq * probe) / nlist`、`avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` なら `csr`（CUDA/ROCm: `device.type == "cuda"`）。
 
 ---
 

@@ -27,7 +27,7 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 | Tuning | `nprobe`, etc. | `nprobe` + `search_mode` + `max_codes` |
 
 **Recommended for GPU**: `search_mode="auto"` (a lighter path for tiny batches, and `csr` for throughput)  
-Auto switch rule: `avg_group_size = (nq * nprobe) / nlist`, use `csr` when `avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` (CUDA only).
+Auto switch rule: `probe = min(nprobe, nlist)`, `avg_group_size = (nq * probe) / nlist`, use `csr` when `avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` (CUDA/ROCm: `device.type == "cuda"`).
 
 ---
 

@@ -27,6 +27,7 @@ class BenchmarkResult:
     auto_avg_group_size: Optional[float]
     auto_threshold: Optional[float]
     auto_search_avg_group_threshold: Optional[float]
+    auto_enabled: Optional[int]
     metric: str
     dim: int
     nb: int
@@ -124,7 +125,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     )
     index.max_codes = args.max_codes
     index.search_mode = args.search_mode
-    params = SearchParams(
+    params_debug = SearchParams(
         profile="speed",
         approximate=index.approximate_mode,
         nprobe=index.nprobe,
@@ -171,7 +172,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     warmup = max(0, int(args.warmup))
     repeat = max(1, int(args.repeat))
     for _ in range(warmup):
-        index.search(queries, args.topk, params=params)
+        index.search(queries, args.topk)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
@@ -181,7 +182,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     times_ms: list[float] = []
     for _ in range(repeat):
         s0 = time.perf_counter()
-        index.search(queries, args.topk, params=params)
+        index.search(queries, args.topk)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         times_ms.append((time.perf_counter() - s0) * 1000)
@@ -196,6 +197,9 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     search_ms_min = float(min(times_ms))
     qps = args.nq / (search_ms / 1000) if search_ms > 0 else float("inf")
 
+    index.search(queries, args.topk, params=params_debug)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
     backend = _detect_backend(device)
     stats = index.last_search_stats or {}
     chosen_mode = str(stats.get("chosen_mode", args.search_mode))
@@ -209,6 +213,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
         auto_avg_group_size=stats.get("auto_avg_group_size"),
         auto_threshold=stats.get("auto_threshold"),
         auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
+        auto_enabled=stats.get("auto_enabled"),
         metric=args.metric,
         dim=dim,
         nb=nb,

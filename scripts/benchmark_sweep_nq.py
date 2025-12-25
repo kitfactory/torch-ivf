@@ -35,6 +35,7 @@ class NQSweepResult:
     auto_avg_group_size: float | None
     auto_threshold: float | None
     auto_search_avg_group_threshold: float | None
+    auto_enabled: int | None
     metric: str
     dim: int
     nb: int
@@ -228,16 +229,19 @@ def main() -> None:
 
         for mode in search_modes:
             torch_index.search_mode = mode
-            params = SearchParams(
+            search_ms, search_ms_min = _time_torch_search(
+                torch_index, xq_t, args.topk, warmup=warmup, repeat=repeat, params=None
+            )
+            params_debug = SearchParams(
                 profile="speed",
                 approximate=torch_index.approximate_mode,
                 nprobe=torch_index.nprobe,
                 max_codes=torch_index.max_codes,
                 debug_stats=True,
             )
-            search_ms, search_ms_min = _time_torch_search(
-                torch_index, xq_t, args.topk, warmup=warmup, repeat=repeat, params=params
-            )
+            torch_index.search(xq_t, args.topk, params=params_debug)
+            if torch_device.type == "cuda":
+                torch.cuda.synchronize(torch_device)
             stats = torch_index.last_search_stats or {}
             chosen_mode = str(stats.get("chosen_mode", mode))
             qps = nq / (search_ms / 1000) if search_ms > 0 else float("inf")
@@ -252,6 +256,7 @@ def main() -> None:
                     auto_avg_group_size=stats.get("auto_avg_group_size"),
                     auto_threshold=stats.get("auto_threshold"),
                     auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
+                    auto_enabled=stats.get("auto_enabled"),
                     metric=args.metric,
                     dim=args.dim,
                     nb=args.nb,
@@ -289,6 +294,7 @@ def main() -> None:
                     auto_avg_group_size=None,
                     auto_threshold=None,
                     auto_search_avg_group_threshold=None,
+                    auto_enabled=None,
                     metric=args.metric,
                     dim=args.dim,
                     nb=args.nb,
