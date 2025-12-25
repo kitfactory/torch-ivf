@@ -69,6 +69,7 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 これらの条件でQPSを記載する場合は、パラメータも併記してください。
 - `max_codes`（例: `32768`）で候補数の上限を設定する。
 - `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")`（L2のみ）。
+補足: 本環境の sweep では max_codes は throughput を改善しませんでした（max_codes=0 が最速）。速度/精度の調整はまず candidate_budget を推奨します。
 
 
 
@@ -79,6 +80,9 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 - `approx_fast`: `candidate_budget=32768`, `use_per_list_sizes=True`
 - `approx_balanced`: `candidate_budget=65536`, `use_per_list_sizes=True`
 - `approx_quality`: `candidate_budget=131072`, `use_per_list_sizes=True`（下のベンチで recall~0.995）
+
+おすすめ（candidate_budget / per_list, csr, nq=19600 の一例）: fast=16,384（recall~0.831） / balanced=65,536（recall~0.976） / quality=131,072（recall~0.995未満）
+※速度・精度の最適点はデータ分布で変わるため、benchmarks.jsonl の sweep を基準に調整してください。
 
 例:
 
@@ -103,7 +107,7 @@ params = SearchParams(profile="approx_quality", candidate_budget=98304)
 | 65,536 | 57.7k | 0.975880 |
 | 131,072 | 57.6k | 0.994811 |
 
-?: 131,072 ? recall~0.995 ???????0.995 ???????????????
+注: candidate_budget=131,072 は recall が ~0.995 に到達しますが、0.995 のゲートを僅かに下回りました。
 
 
 ### グラフ：QPS vs nq（tiny-batch → throughput）
@@ -197,8 +201,8 @@ uv run python scripts/benchmark_sweep_nq.py --torch-device cuda --torch-search-m
 uv run python scripts/benchmark_sweep_max_codes.py --torch-device cuda --torch-search-mode csr
 ```
 
-Latest sweep timestamp (this README): `2025-12-25T15:32:17`
-Example --timestamp filter (exact match):
+最新の sweep timestamp（この README）: `2025-12-25T15:32:17`
+--timestamp の例（完全一致）:
 ```bash
 uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.jsonl --preset latency --nq-list 8,32,64,128,256,512 --top 3 --timestamp 2025-12-25T15:32:17
 ```

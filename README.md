@@ -69,6 +69,7 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 If you report QPS with these, include the exact params alongside the numbers.
 - `max_codes` (e.g. `32768`) to cap candidates per query.
 - `SearchParams(profile="approx", candidate_budget=32768, budget_strategy="distance_weighted", list_ordering="residual_norm_asc")` (L2 only).
+Note: In this sweep, max_codes did not improve throughput on this setup (max_codes=0 was fastest). Prefer candidate_budget for speed/quality tuning.
 
 ### Approximation presets (per-list budgets)
 
@@ -77,6 +78,11 @@ If you report QPS with these, include the exact params alongside the numbers.
 - `approx_fast`: `candidate_budget=32768`, `use_per_list_sizes=True`
 - `approx_balanced`: `candidate_budget=65536`, `use_per_list_sizes=True`
 - `approx_quality`: `candidate_budget=131072`, `use_per_list_sizes=True` (aims for recall≈0.995 vs unlimited on the benchmark below)
+
+Suggested (candidate_budget / per_list, csr, nq=19600; this setup): fast=16,384 (recall~0.831) / balanced=65,536 (recall~0.976) / quality=131,072 (just below 0.995 recall).
+Tune based on your dataset; see the JSONL sweep for details.
+
+
 
 Example:
 
