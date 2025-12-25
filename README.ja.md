@@ -98,12 +98,12 @@ params = SearchParams(profile="approx_quality", candidate_budget=98304)
 
 | candidate_budget | QPS | recall@k（unlimited 比） |
 |---:|---:|---:|
-| 32,768 | 54.9k | 0.930242 |
-| 65,536 | 51.9k | 0.976895 |
-| 98,304 | 53.8k | 0.990066 |
-| 131,072 | 50.8k | 0.995046 |
+| 16,384 | 69.0k | 0.830992 |
+| 32,768 | 43.4k | 0.927214 |
+| 65,536 | 57.7k | 0.975880 |
+| 131,072 | 57.6k | 0.994811 |
 
-注: 98,304（約96k）は recall~0.99 まで到達しますが、0.995 のゲートは満たしません。
+?: 131,072 ? recall~0.995 ???????0.995 ???????????????
 
 
 ### グラフ：QPS vs nq（tiny-batch → throughput）
@@ -195,6 +195,12 @@ README のグラフ/表を再現する最短手順です。
 uv run python scripts/dump_env.py
 uv run python scripts/benchmark_sweep_nq.py --torch-device cuda --torch-search-mode auto
 uv run python scripts/benchmark_sweep_max_codes.py --torch-device cuda --torch-search-mode csr
+```
+
+Latest sweep timestamp (this README): `2025-12-25T15:32:17`
+Example --timestamp filter (exact match):
+```bash
+uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.jsonl --preset latency --nq-list 8,32,64,128,256,512 --top 3 --timestamp 2025-12-25T15:32:17
 ```
 
 結果は [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl) に追記されます。最新レコードに合わせて README の代表値を更新してください。

@@ -96,12 +96,12 @@ params = SearchParams(profile="approx_quality", candidate_budget=98304)
 
 | candidate_budget | QPS | recall@k vs unlimited |
 |---:|---:|---:|
-| 32,768 | 54.9k | 0.930242 |
-| 65,536 | 51.9k | 0.976895 |
-| 98,304 | 53.8k | 0.990066 |
-| 131,072 | 50.8k | 0.995046 |
+| 16,384 | 69.0k | 0.830992 |
+| 32,768 | 43.4k | 0.927214 |
+| 65,536 | 57.7k | 0.975880 |
+| 131,072 | 57.6k | 0.994811 |
 
-Note: 98,304 (~96k) reaches ~0.99 recall but does not meet the 0.995 gate.
+Note: 131,072 reaches ~0.995 recall but is still slightly below the 0.995 gate.
 
 ### Add performance (batch size sweep)
 
@@ -202,6 +202,12 @@ Shortest steps to reproduce the chart/table in this README:
 uv run python scripts/dump_env.py
 uv run python scripts/benchmark_sweep_nq.py --torch-device cuda --torch-search-mode auto
 uv run python scripts/benchmark_sweep_max_codes.py --torch-device cuda --torch-search-mode csr
+```
+
+Latest sweep timestamp (this README): `2025-12-25T15:32:17`  
+Example timestamp filter (exact match):
+```bash
+uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.jsonl --preset latency --nq-list 8,32,64,128,256,512 --top 3 --timestamp 2025-12-25T15:32:17
 ```
 
 Results are appended to [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl). Update the representative values in this README to match the latest records.
