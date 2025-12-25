@@ -1175,14 +1175,21 @@ class IndexIVFFlat(IndexBase):
         self,
         groups: torch.Tensor,
         task_sizes: torch.Tensor | None,
-    ) -> list[list[int]]:
+    ) -> torch.Tensor:
         if groups.numel() == 0:
-            return []
+            return torch.empty((0, 4), dtype=groups.dtype, device="cpu")
         if task_sizes is None:
             pad = torch.zeros((groups.shape[0], 1), dtype=groups.dtype, device=groups.device)
-            return torch.cat([groups, pad], dim=1).to("cpu").tolist()
-        group_max = self._group_task_max_sizes(task_sizes, groups)
-        return torch.cat([groups, group_max.unsqueeze(1)], dim=1).to("cpu").tolist()
+            groups_cpu = torch.cat([groups, pad], dim=1).to("cpu")
+        else:
+            group_max = self._group_task_max_sizes(task_sizes, groups)
+            groups_cpu = torch.cat([groups, group_max.unsqueeze(1)], dim=1).to("cpu")
+        if groups_cpu.numel() == 0:
+            return groups_cpu
+        mask = groups_cpu[:, 1] != groups_cpu[:, 2]
+        if bool(mask.all()):
+            return groups_cpu
+        return groups_cpu[mask]
 
     def _build_candidate_index_matrix_from_lists(
         self,
@@ -1533,6 +1540,8 @@ class IndexIVFFlat(IndexBase):
             )
             debug_stats["list_groups"] = int(debug_stats.get("list_groups", 0)) + int(groups.shape[0])
         groups_cpu = self._csr_groups_cpu(groups, task_sizes)
+        if groups_cpu.numel() == 0:
+            return best_scores, best_packed
         if (
             per_list_sizes is not None
             and self.metric == "l2"
@@ -1552,7 +1561,8 @@ class IndexIVFFlat(IndexBase):
             out_ids = self._list_ids.index_select(0, best_packed.clamp_min(0).reshape(-1)).reshape(best_packed.shape)
             out_ids = torch.where(best_packed < 0, torch.full_like(out_ids, -1), out_ids)
             return best_scores, out_ids
-        for l, start, end, max_len in groups_cpu:
+        groups_np = groups_cpu.numpy()
+        for l, start, end, max_len in groups_np:
             a = int(self._list_offsets_cpu[int(l)])
             b = int(self._list_offsets_cpu[int(l) + 1])
             if b <= a:
@@ -1685,7 +1695,7 @@ class IndexIVFFlat(IndexBase):
         q2_tasks: torch.Tensor | None,
         tasks_q: torch.Tensor,
         task_sizes: torch.Tensor | None,
-        groups_cpu: list[list[int]],
+        groups_cpu: torch.Tensor,
         k: int,
         *,
         best_scores: torch.Tensor,
@@ -1696,7 +1706,7 @@ class IndexIVFFlat(IndexBase):
         if q2_tasks is None or task_sizes is None:
             return False
         block_size = self._csr_list_block_size()
-        if block_size <= 1 or not groups_cpu:
+        if block_size <= 1 or groups_cpu.numel() == 0:
             return False
         pad_ratio_limit = float(self._csr_block_pad_ratio_limit())
         max_block_elements = int(self._csr_block_max_elements())
@@ -1712,7 +1722,8 @@ class IndexIVFFlat(IndexBase):
         d = self.d
         largest = self.metric == "ip"
         group_entries: list[tuple[int, int, int, int, int, int, int]] = []
-        for l, start, end, max_len in groups_cpu:
+        groups_np = groups_cpu.numpy()
+        for l, start, end, max_len in groups_np:
             s = int(start)
             e = int(end)
             if e <= s:
@@ -1967,8 +1978,19 @@ class IndexIVFFlat(IndexBase):
             )
         with torch.autograd.profiler.record_function("CSR_BUF_GROUPS_CPU"):
             groups_cpu = self._csr_groups_cpu(groups, task_sizes)
+        if groups_cpu.numel() == 0:
+            best_scores = self._workspace.ensure(
+                "csr_buf_best_scores", (chunk_size, k), dtype=self.dtype, device=self.device
+            )
+            best_scores.fill_(fill)
+            best_ids = self._workspace.ensure(
+                "csr_buf_best_ids", (chunk_size, k), dtype=torch.long, device=self.device
+            )
+            best_ids.fill_(-1)
+            return best_scores, best_ids
         vec_chunk = self._csr_vec_chunk(buffered=True)
-        for l, start, end, max_len in groups_cpu:
+        groups_np = groups_cpu.numpy()
+        for l, start, end, max_len in groups_np:
             a = int(self._list_offsets_cpu[int(l)])
             b = int(self._list_offsets_cpu[int(l) + 1])
             if b <= a:
@@ -2148,6 +2170,8 @@ class IndexIVFFlat(IndexBase):
     def _csr_task_budget(self) -> int:
         if self.device.type == "cpu":
             return 20_000
+        if self._max_codes == 0:
+            return 700_000
         return 200_000
 
     def _bytes_per_vector(self) -> int:
