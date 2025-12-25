@@ -4,7 +4,7 @@
 The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with a strong focus on Windows + ROCm).
 
 - 🔁 **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
-- 📈 **Up to 5.07x vs faiss-cpu in the throughput regime** (`nq=19600`: 46,093 / 9,089 ≒ 5.07x)
+- 📈 **Up to 6.21x vs faiss-cpu in the throughput regime** (`nq=19600`: 63,016 / 10,153 ~6.21x)
 - 🧩 **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
 - 🧪 **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
 
@@ -54,16 +54,16 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 
 > Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > Environment: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
-> Updated: `2025-12-25T10:05:50` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
+> Updated: `2025-12-25T11:03:01` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
 >
 > Note: this table is **fixed to `search_mode=auto`** to show the recommended default (auto picks a lighter path for tiny batches and `csr` for throughput). For maximum throughput, set `search_mode=csr`.
 > faiss-cpu uses the default thread settings (environment-dependent). For reproducibility, fix `OMP_NUM_THREADS` (e.g. Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`).
 
 | nq | torch-ivf (ROCm GPU, auto) | faiss-cpu (CPU) |
 |---:|---:|---:|
-| 512 | **18,653 QPS** | 6,425 QPS |
-| 2,048 | **32,486 QPS** | 8,470 QPS |
-| 19,600 | **52,450 QPS** | 10,214 QPS |
+| 512 | **25,562 QPS** | 6,555 QPS |
+| 2,048 | **39,695 QPS** | 8,312 QPS |
+| 19,600 | **63,016 QPS** | 10,153 QPS |
 
 **Speed-leaning params (optional; recall trade-off)**  
 If you report QPS with these, include the exact params alongside the numbers.
