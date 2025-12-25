@@ -1452,6 +1452,17 @@ class IndexIVFFlat(IndexBase):
                 debug_stats=debug_stats,
             )
 
+        if self.device.type != "cpu" and per_list_sizes is None:
+            return self._search_csr_buffered_chunk(
+                q,
+                q2,
+                top_lists,
+                k,
+                max_codes=max_codes,
+                per_list_sizes=per_list_sizes,
+                debug_stats=debug_stats,
+            )
+
         if per_list_sizes is None:
             tasks_q, _, groups = self._build_tasks_from_lists(top_lists, max_codes=max_codes)
             tasks_p = None
@@ -1548,10 +1559,10 @@ class IndexIVFFlat(IndexBase):
                         mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
                         dist.masked_fill_(mask, float("inf"))
                     topk = min(k, dist.shape[1])
-                    cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1)
+                    cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
                 else:
                     topk = min(k, prod.shape[1])
-                    cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1)
+                    cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
                 cand_packed = (a + cand_j).to(torch.long)
                 if topk < k:
                     pad_cols = k - topk
@@ -1598,10 +1609,10 @@ class IndexIVFFlat(IndexBase):
                             mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
                             dist.masked_fill_(mask, float("inf"))
                         topk = min(k, dist.shape[1])
-                        cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1)
+                        cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
                     else:
                         topk = min(k, prod.shape[1])
-                        cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1)
+                        cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
 
                     cand_packed = (p + cand_j).to(torch.long)
                     if topk < k:
@@ -1828,7 +1839,7 @@ class IndexIVFFlat(IndexBase):
             dist.masked_fill_(group_mask, float("inf"))
 
             topk = min(k, lmax)
-            cand_scores, cand_j = torch.topk(dist, topk, largest=largest, dim=2)
+            cand_scores, cand_j = torch.topk(dist, topk, largest=largest, dim=2, sorted=False)
             offsets = offsets_buf[:bcount].view(bcount, 1, 1)
             cand_packed = cand_j + offsets
 
@@ -1957,10 +1968,10 @@ class IndexIVFFlat(IndexBase):
                     dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
                     dist = dist.clamp_min_(0)
                     topk = min(k, dist.shape[1])
-                    cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1)
+                    cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
                 else:
                     topk = min(k, prod.shape[1])
-                    cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1)
+                    cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
                 cand_packed = (a + cand_j).to(torch.long)
                 if topk < k:
                     pad_cols = k - topk
@@ -2008,10 +2019,10 @@ class IndexIVFFlat(IndexBase):
                             mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
                             dist.masked_fill_(mask, float("inf"))
                         topk = min(k, dist.shape[1])
-                        cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1)
+                        cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
                     else:
                         topk = min(k, prod.shape[1])
-                        cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1)
+                        cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
 
                     cand_packed = (p + cand_j).to(torch.long)
                     if topk < k:
