@@ -1246,6 +1246,24 @@ class IndexIVFFlat(IndexBase):
             return empty, empty, empty
 
         b, probe = top_lists.shape
+        if per_list_sizes is None:
+            max_codes_i = self._max_codes if max_codes is None else int(max_codes)
+            if max_codes_i == 0:
+                tasks_l = top_lists.reshape(-1)
+                if tasks_l.dtype != torch.long:
+                    tasks_l = tasks_l.to(torch.long)
+                if tasks_l.numel() == 0:
+                    empty = torch.empty(0, dtype=torch.long, device=self.device)
+                    return empty, empty, empty
+                tasks_q = torch.arange(b, dtype=torch.long, device=self.device).repeat_interleave(probe)
+                perm = torch.argsort(tasks_l)
+                tasks_l = tasks_l[perm]
+                tasks_q = tasks_q[perm]
+                unique_l, counts = torch.unique_consecutive(tasks_l, return_counts=True)
+                starts = torch.cumsum(counts, dim=0) - counts
+                ends = starts + counts
+                groups = torch.stack([unique_l, starts, ends], dim=1)
+                return tasks_q, tasks_l, groups
         sizes = self._get_list_sizes()[top_lists]
         if per_list_sizes is not None:
             sizes = torch.minimum(sizes, per_list_sizes)
@@ -1287,6 +1305,26 @@ class IndexIVFFlat(IndexBase):
             return empty, empty, empty, empty
 
         b, probe = top_lists.shape
+        if per_list_sizes is None:
+            max_codes_i = self._max_codes if max_codes is None else int(max_codes)
+            if max_codes_i == 0:
+                tasks_l = top_lists.reshape(-1)
+                if tasks_l.dtype != torch.long:
+                    tasks_l = tasks_l.to(torch.long)
+                if tasks_l.numel() == 0:
+                    empty = torch.empty(0, dtype=torch.long, device=self.device)
+                    return empty, empty, empty, empty
+                tasks_q = torch.arange(b, dtype=torch.long, device=self.device).repeat_interleave(probe)
+                tasks_p = torch.arange(probe, dtype=torch.long, device=self.device).repeat(b)
+                perm = torch.argsort(tasks_l)
+                tasks_l = tasks_l[perm]
+                tasks_q = tasks_q[perm]
+                tasks_p = tasks_p[perm]
+                unique_l, counts = torch.unique_consecutive(tasks_l, return_counts=True)
+                starts = torch.cumsum(counts, dim=0) - counts
+                ends = starts + counts
+                groups = torch.stack([unique_l, starts, ends], dim=1)
+                return tasks_q, tasks_l, tasks_p, groups
         sizes = self._get_list_sizes()[top_lists]
         if per_list_sizes is not None:
             sizes = torch.minimum(sizes, per_list_sizes)
