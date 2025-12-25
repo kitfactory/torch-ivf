@@ -29,6 +29,14 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 **Recommended for GPU**: `search_mode="auto"` (a lighter path for tiny batches, and `csr` for throughput)  
 Auto switch rule: `probe = min(nprobe, nlist)`, `avg_group_size = (nq * probe) / nlist`, use `csr` when `avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` (CUDA/ROCm: `device.type == "cuda"`).
 
+`auto_search_avg_group_threshold` defaults to 8.0.  
+Scoring the benchmark JSONL with `scripts/score_auto_threshold.py` (preset: latency, nq=8/32/64/128/256/512, metric: QPS×recall) shows threshold=6 as the best by a small margin, with 8 as the runner-up. Tune as needed (e.g. `--preset throughput` or custom weights).
+
+Example:
+```bash
+uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.jsonl --preset latency --nq-list 8,32,64,128,256,512 --top 3
+```
+
 ---
 
 ## Where Is It Fast? (one-screen summary)

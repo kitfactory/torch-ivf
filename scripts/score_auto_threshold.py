@@ -49,7 +49,11 @@ def parse_args() -> argparse.Namespace:
         help='override weights, e.g. "8:0.35,32:0.35,64:0.15,128:0.10,256:0.04,512:0.01"',
     )
     p.add_argument("--metric", default=None, help="optional metric filter (l2/ip)")
-    p.add_argument("--timestamp", default=None, help="optional timestamp filter (exact match)")
+    p.add_argument(
+        "--timestamp",
+        default=None,
+        help="optional timestamp filter (exact match, e.g. 2025-12-25T10:03:24)",
+    )
     p.add_argument("--top", type=int, default=0, help="show top N thresholds (0=all)")
     return p.parse_args()
 

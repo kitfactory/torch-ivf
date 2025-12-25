@@ -29,6 +29,14 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 **GPU 推奨設定**：`search_mode="auto"`（tiny-batch は軽い経路、throughput は `csr`）  
 切り替え基準: `probe = min(nprobe, nlist)`、`avg_group_size = (nq * probe) / nlist`、`avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` なら `csr`（CUDA/ROCm: `device.type == "cuda"`）。
 
+`auto_search_avg_group_threshold` の既定値は 8.0 です。  
+`scripts/score_auto_threshold.py` でベンチ JSONL を集計（preset: latency, nq=8/32/64/128/256/512, 指標: QPS×recall）すると、閾値=6 が僅差で最良、8 が次点でした。用途に応じて調整してください（例: `--preset throughput` や任意重み）。
+
+実行例:
+```bash
+uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.jsonl --preset latency --nq-list 8,32,64,128,256,512 --top 3
+```
+
 ---
 
 ## どういった領域で速いか？（1枚まとめ）
