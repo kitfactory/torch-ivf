@@ -4,7 +4,7 @@
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
 
 - 🔁 **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
-- 📈 **throughput 領域で faiss-cpu を最大 6.21x**（`nq=19600` で 63,016 / 10,153 ~6.21x）
+- 📈 **throughput 領域で faiss-cpu を最大 6.83x**（`nq=19600` で 69,632 / 10,196 ~6.83x）
 - 🧩 **PyTorch の backend が動けば同じコードで動く**（CPU/CUDA/ROCm/DirectML。*One codebase across backends*）
 - 🧪 **実測・再現手順あり**（env/jsonl + scripts 同梱。*Reproducible benchmarks included*）
 
@@ -54,16 +54,16 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > 実行環境: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
-> 更新日時: `2025-12-25T11:03:01`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
+> 更新日時: `2025-12-25T15:32:17`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
 >
 > ※この表は **`search_mode=auto` 固定**です（auto は tiny-batch では軽い経路、throughput では `csr` を選択）。最大 throughput を見たい場合は `search_mode=csr` を指定してください。
 > faiss-cpu は既定スレッド設定（環境依存）です。再現する場合は `OMP_NUM_THREADS` を固定してください（例: Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`）。
 
 | nq | torch-ivf（ROCm GPU, auto） | faiss-cpu（CPU） |
 |---:|---:|---:|
-| 512 | **25,562 QPS** | 6,555 QPS |
-| 2,048 | **39,695 QPS** | 8,312 QPS |
-| 19,600 | **63,016 QPS** | 10,153 QPS |
+| 512 | **16,078 QPS** | 6,419 QPS |
+| 2,048 | **36,831 QPS** | 8,352 QPS |
+| 19,600 | **69,632 QPS** | 10,196 QPS |
 
 **速度優先パラメータ（任意・recall低下の可能性あり）**  
 これらの条件でQPSを記載する場合は、パラメータも併記してください。
