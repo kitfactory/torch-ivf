@@ -46,16 +46,16 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > 実行環境: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
-> 更新日時: `2025-12-24T18:08:10`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
+> 更新日時: `2025-12-25T10:05:50`（`scripts/benchmark_sweep_nq.py`、`search_ms` は median）
 >
 > ※この表は **`search_mode=auto` 固定**です（auto は tiny-batch では軽い経路、throughput では `csr` を選択）。最大 throughput を見たい場合は `search_mode=csr` を指定してください。
 > faiss-cpu は既定スレッド設定（環境依存）です。再現する場合は `OMP_NUM_THREADS` を固定してください（例: Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`）。
 
 | nq | torch-ivf（ROCm GPU, auto） | faiss-cpu（CPU） |
 |---:|---:|---:|
-| 512 | **20,017 QPS** | 6,271 QPS |
-| 2,048 | **36,344 QPS** | 10,000 QPS |
-| 19,600 | **50,709 QPS** | 9,758 QPS |
+| 512 | **18,653 QPS** | 6,425 QPS |
+| 2,048 | **32,486 QPS** | 8,470 QPS |
+| 19,600 | **52,450 QPS** | 10,214 QPS |
 
 **速度優先パラメータ（任意・recall低下の可能性あり）**  
 これらの条件でQPSを記載する場合は、パラメータも併記してください。
@@ -100,7 +100,7 @@ params = SearchParams(profile="approx_quality", candidate_budget=98304)
 
 ### グラフ：QPS vs nq（tiny-batch → throughput）
 
-赤: torch-ivf（ROCm GPU, auto） / 黒: faiss-cpu（CPU）
+青: torch-ivf（ROCm GPU, matrix） / 赤: torch-ivf（ROCm GPU, csr） / 緑: torch-ivf（ROCm GPU, auto）
 
 ![QPS vs nq](docs/assets/qps_vs_nq.svg)
 
