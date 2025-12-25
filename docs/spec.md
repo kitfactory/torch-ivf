@@ -385,6 +385,7 @@ def search_ivf_csr(
 - `scripts/benchmark.py`（torch-ivf）と `scripts/benchmark_faiss_cpu.py`（faiss-cpu）で取得した結果を JSON Lines (`benchmarks/benchmarks.jsonl`) に追記する。
 - `scripts/benchmark_sweep_max_codes.py` は `max_codes` の速度/精度（自己比較）を複数点で記録する用途で使う。
 - `scripts/benchmark_sweep_auto_threshold.py` は `auto_search_avg_group_threshold` をスイープし、`recall_at_k_vs_unlimited` と `qps_recall` を記録する。
+- `scripts/score_auto_threshold.py` は JSONL から閾値のスコアを計算し、重み付きランキングを出力する。
 - レコードには `library`, `device`, `backend`, `search_mode`, `chosen_mode`, `auto_avg_group_size`, `auto_threshold`, `auto_search_avg_group_threshold`, `auto_enabled`, `metric`, `dim`, `nb`, `nq`, `nlist`, `nprobe`, `max_codes`, `topk`, `dtype`, `train_ms`, `add_ms`, `search_ms`, `search_ms_min`, `warmup`, `repeat`, `qps`, `torch_version`, `python_version`, `host_cpu`, `host_os`, `timestamp`, `label` を含める。
 - レコードには `train_n`（学習点数）も含める（`--train-n` で指定、0 の場合は自動）。
 - `scripts/benchmark_sweep_max_codes.py` のレコードは追加で `recall_at_k_vs_unlimited`（同一ライブラリの `max_codes=0` を基準とした recall@k）を含める。
