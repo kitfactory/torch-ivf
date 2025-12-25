@@ -26,6 +26,10 @@ class CandidateBudgetSweepResult:
     device_name: str
     backend: str
     search_mode: str
+    chosen_mode: str
+    auto_avg_group_size: float | None
+    auto_threshold: float | None
+    auto_search_avg_group_threshold: float | None
     metric: str
     dim: int
     nb: int
@@ -251,10 +255,13 @@ def main() -> None:
             max_codes_cap_per_list=args.max_codes_cap_per_list,
             strict_budget=args.strict_budget,
             use_per_list_sizes=use_per_list_sizes,
+            debug_stats=True,
         )
         search_ms, search_ms_min, labels = _time_torch_search(
             index, xq, args.topk, warmup=warmup, repeat=repeat, params=params
         )
+        stats = index.last_search_stats or {}
+        chosen_mode = str(stats.get("chosen_mode", args.torch_search_mode))
         labels_np = labels.detach().to("cpu").numpy().astype(np.int64, copy=False)
         recall = _recall_at_k_vs_unlimited(base_labels_np, labels_np)
         qps = args.nq / (search_ms / 1000) if search_ms > 0 else float("inf")
@@ -265,6 +272,10 @@ def main() -> None:
                 device_name=_device_name(torch_device),
                 backend=_detect_backend(torch_device),
                 search_mode=args.torch_search_mode,
+                chosen_mode=chosen_mode,
+                auto_avg_group_size=stats.get("auto_avg_group_size"),
+                auto_threshold=stats.get("auto_threshold"),
+                auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
                 metric=args.metric,
                 dim=args.dim,
                 nb=args.nb,

@@ -21,7 +21,7 @@ import faiss
 import numpy as np
 import torch
 
-from torch_ivf.index import IndexIVFFlat
+from torch_ivf.index import IndexIVFFlat, SearchParams
 
 
 @dataclass
@@ -31,6 +31,10 @@ class NQSweepResult:
     device_name: str
     backend: str
     search_mode: str
+    chosen_mode: str
+    auto_avg_group_size: float | None
+    auto_threshold: float | None
+    auto_search_avg_group_threshold: float | None
     metric: str
     dim: int
     nb: int
@@ -110,17 +114,29 @@ def _parse_int_list(text: str) -> list[int]:
 
 
 def _time_torch_search(
-    index: IndexIVFFlat, xq: torch.Tensor, k: int, *, warmup: int, repeat: int
+    index: IndexIVFFlat,
+    xq: torch.Tensor,
+    k: int,
+    *,
+    warmup: int,
+    repeat: int,
+    params: SearchParams | None = None,
 ) -> tuple[float, float]:
     device = xq.device
     for _ in range(warmup):
-        index.search(xq, k)
+        if params is None:
+            index.search(xq, k)
+        else:
+            index.search(xq, k, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
     times_ms: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        index.search(xq, k)
+        if params is None:
+            index.search(xq, k)
+        else:
+            index.search(xq, k, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         times_ms.append((time.perf_counter() - t0) * 1000)
@@ -212,7 +228,18 @@ def main() -> None:
 
         for mode in search_modes:
             torch_index.search_mode = mode
-            search_ms, search_ms_min = _time_torch_search(torch_index, xq_t, args.topk, warmup=warmup, repeat=repeat)
+            params = SearchParams(
+                profile="speed",
+                approximate=torch_index.approximate_mode,
+                nprobe=torch_index.nprobe,
+                max_codes=torch_index.max_codes,
+                debug_stats=True,
+            )
+            search_ms, search_ms_min = _time_torch_search(
+                torch_index, xq_t, args.topk, warmup=warmup, repeat=repeat, params=params
+            )
+            stats = torch_index.last_search_stats or {}
+            chosen_mode = str(stats.get("chosen_mode", mode))
             qps = nq / (search_ms / 1000) if search_ms > 0 else float("inf")
             records.append(
                 NQSweepResult(
@@ -221,6 +248,10 @@ def main() -> None:
                     device_name=_device_name(torch_device),
                     backend=_detect_backend(torch_device),
                     search_mode=mode,
+                    chosen_mode=chosen_mode,
+                    auto_avg_group_size=stats.get("auto_avg_group_size"),
+                    auto_threshold=stats.get("auto_threshold"),
+                    auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
                     metric=args.metric,
                     dim=args.dim,
                     nb=args.nb,
@@ -254,6 +285,10 @@ def main() -> None:
                     device_name=platform.processor() or "CPU",
                     backend="faiss-cpu",
                     search_mode="faiss",
+                    chosen_mode="faiss",
+                    auto_avg_group_size=None,
+                    auto_threshold=None,
+                    auto_search_avg_group_threshold=None,
                     metric=args.metric,
                     dim=args.dim,
                     nb=args.nb,

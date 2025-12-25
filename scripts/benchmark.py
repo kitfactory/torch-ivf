@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 
-from torch_ivf.index import IndexIVFFlat
+from torch_ivf.index import IndexIVFFlat, SearchParams
 
 
 @dataclass
@@ -23,6 +23,10 @@ class BenchmarkResult:
     device_name: str
     backend: str
     search_mode: str
+    chosen_mode: str
+    auto_avg_group_size: Optional[float]
+    auto_threshold: Optional[float]
+    auto_search_avg_group_threshold: Optional[float]
     metric: str
     dim: int
     nb: int
@@ -120,6 +124,13 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     )
     index.max_codes = args.max_codes
     index.search_mode = args.search_mode
+    params = SearchParams(
+        profile="speed",
+        approximate=index.approximate_mode,
+        nprobe=index.nprobe,
+        max_codes=index.max_codes,
+        debug_stats=True,
+    )
 
     device_total_memory_bytes: Optional[int] = None
     mem_allocated_bytes: Optional[int] = None
@@ -160,7 +171,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     warmup = max(0, int(args.warmup))
     repeat = max(1, int(args.repeat))
     for _ in range(warmup):
-        index.search(queries, args.topk)
+        index.search(queries, args.topk, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
@@ -170,7 +181,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     times_ms: list[float] = []
     for _ in range(repeat):
         s0 = time.perf_counter()
-        index.search(queries, args.topk)
+        index.search(queries, args.topk, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         times_ms.append((time.perf_counter() - s0) * 1000)
@@ -186,12 +197,18 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
     qps = args.nq / (search_ms / 1000) if search_ms > 0 else float("inf")
 
     backend = _detect_backend(device)
+    stats = index.last_search_stats or {}
+    chosen_mode = str(stats.get("chosen_mode", args.search_mode))
     return BenchmarkResult(
         library="torch_ivf",
         device=str(device),
         device_name=_device_name(device),
         backend=backend,
         search_mode=args.search_mode,
+        chosen_mode=chosen_mode,
+        auto_avg_group_size=stats.get("auto_avg_group_size"),
+        auto_threshold=stats.get("auto_threshold"),
+        auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
         metric=args.metric,
         dim=dim,
         nb=nb,

@@ -324,7 +324,19 @@ class IndexIVFFlat(IndexBase):
         else:
             top_lists = self._top_probed_lists(xq, nprobe=config.nprobe)
 
-        if self._search_mode == "csr":
+        chosen_mode = self._search_mode
+        auto_avg_group_size = None
+        auto_threshold = None
+        if self._search_mode == "auto":
+            probe = min(config.nprobe, self._nlist)
+            auto_avg_group_size = (xq.shape[0] * probe) / max(1, self._nlist)
+            auto_threshold = self._auto_search_avg_group_threshold * (self._nlist / 512)
+            if xq.device.type == "cuda" and auto_avg_group_size >= auto_threshold:
+                chosen_mode = "csr"
+            else:
+                chosen_mode = "matrix"
+
+        if chosen_mode == "csr":
             results = self._search_csr_online(
                 xq,
                 k,
@@ -338,29 +350,16 @@ class IndexIVFFlat(IndexBase):
                 debug_stats["search_path"] = "csr"
                 debug_stats["nprobe_eff"] = int(config.nprobe)
                 debug_stats["max_codes_eff"] = int(effective_max_codes)
+                debug_stats["chosen_mode"] = chosen_mode
+                if self._search_mode == "auto":
+                    debug_stats["auto_avg_group_size"] = float(auto_avg_group_size)
+                    debug_stats["auto_threshold"] = float(auto_threshold)
+                    debug_stats["auto_search_avg_group_threshold"] = float(
+                        self._auto_search_avg_group_threshold
+                    )
+                    debug_stats["auto_enabled"] = int(xq.device.type == "cuda")
                 self._last_search_stats = debug_stats
             return results
-
-        if self._search_mode == "auto" and xq.device.type == "cuda":
-            probe = min(config.nprobe, self._nlist)
-            avg_group_size = (xq.shape[0] * probe) / max(1, self._nlist)
-            auto_threshold = self._auto_search_avg_group_threshold * (self._nlist / 512)
-            if avg_group_size >= auto_threshold:
-                results = self._search_csr_online(
-                    xq,
-                    k,
-                    max_codes=effective_max_codes,
-                    nprobe=config.nprobe,
-                    top_lists=top_lists,
-                    per_list_sizes=per_list_sizes,
-                    debug_stats=debug_stats,
-                )
-                if debug_stats is not None:
-                    debug_stats["search_path"] = "csr"
-                    debug_stats["nprobe_eff"] = int(config.nprobe)
-                    debug_stats["max_codes_eff"] = int(effective_max_codes)
-                    self._last_search_stats = debug_stats
-                return results
 
         query_candidate_counts = self._estimate_candidates_per_query(
             top_lists, max_codes=effective_max_codes, per_list_sizes=per_list_sizes
@@ -397,6 +396,14 @@ class IndexIVFFlat(IndexBase):
             debug_stats["max_codes_eff"] = int(effective_max_codes)
             debug_stats["chunks"] = int(len(chunks))
             debug_stats["total_candidates_est"] = int(query_candidate_counts.sum().item())
+            debug_stats["chosen_mode"] = chosen_mode
+            if self._search_mode == "auto":
+                debug_stats["auto_avg_group_size"] = float(auto_avg_group_size)
+                debug_stats["auto_threshold"] = float(auto_threshold)
+                debug_stats["auto_search_avg_group_threshold"] = float(
+                    self._auto_search_avg_group_threshold
+                )
+                debug_stats["auto_enabled"] = int(xq.device.type == "cuda")
             self._last_search_stats = debug_stats
         return dists, labels
 

@@ -18,7 +18,7 @@ import faiss
 import numpy as np
 import torch
 
-from torch_ivf.index import IndexIVFFlat
+from torch_ivf.index import IndexIVFFlat, SearchParams
 
 
 @dataclass
@@ -28,6 +28,10 @@ class SweepResult:
     device_name: str
     backend: str
     search_mode: str
+    chosen_mode: str
+    auto_avg_group_size: float | None
+    auto_threshold: float | None
+    auto_search_avg_group_threshold: float | None
     metric: str
     dim: int
     nb: int
@@ -127,16 +131,30 @@ def _parse_max_codes_list(text: str) -> list[int]:
     return out
 
 
-def _time_torch_search(index: IndexIVFFlat, xq: torch.Tensor, k: int, *, warmup: int, repeat: int) -> tuple[float, float]:
+def _time_torch_search(
+    index: IndexIVFFlat,
+    xq: torch.Tensor,
+    k: int,
+    *,
+    warmup: int,
+    repeat: int,
+    params: SearchParams | None = None,
+) -> tuple[float, float]:
     device = xq.device
     for _ in range(warmup):
-        index.search(xq, k)
+        if params is None:
+            index.search(xq, k)
+        else:
+            index.search(xq, k, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
     times_ms: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        index.search(xq, k)
+        if params is None:
+            index.search(xq, k)
+        else:
+            index.search(xq, k, params=params)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         times_ms.append((time.perf_counter() - t0) * 1000)
@@ -227,11 +245,22 @@ def main() -> None:
 
     for max_codes in max_codes_list:
         torch_index.max_codes = int(max_codes)
-        search_ms, search_ms_min = _time_torch_search(torch_index, xq, args.topk, warmup=warmup, repeat=repeat)
-        D_t, I_t = torch_index.search(xq, args.topk)
+        params = SearchParams(
+            profile="speed",
+            approximate=torch_index.approximate_mode,
+            nprobe=torch_index.nprobe,
+            max_codes=torch_index.max_codes,
+            debug_stats=True,
+        )
+        search_ms, search_ms_min = _time_torch_search(
+            torch_index, xq, args.topk, warmup=warmup, repeat=repeat, params=params
+        )
+        D_t, I_t = torch_index.search(xq, args.topk, params=params)
         if torch_device.type == "cuda":
             torch.cuda.synchronize(torch_device)
         I_t_np = I_t.detach().to("cpu").numpy().astype(np.int64, copy=False)
+        stats = torch_index.last_search_stats or {}
+        chosen_mode = str(stats.get("chosen_mode", args.torch_search_mode))
         recall_t = _recall_at_k_vs_unlimited(I0_torch_np, I_t_np)
         qps_t = args.nq / (search_ms / 1000) if search_ms > 0 else float("inf")
         records.append(
@@ -241,6 +270,10 @@ def main() -> None:
                 device_name=_device_name(torch_device),
                 backend=_detect_backend(torch_device),
                 search_mode=args.torch_search_mode,
+                chosen_mode=chosen_mode,
+                auto_avg_group_size=stats.get("auto_avg_group_size"),
+                auto_threshold=stats.get("auto_threshold"),
+                auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),
                 metric=args.metric,
                 dim=args.dim,
                 nb=args.nb,
@@ -279,6 +312,10 @@ def main() -> None:
                     device_name=platform.processor() or "CPU",
                     backend="faiss-cpu",
                     search_mode="faiss",
+                    chosen_mode="faiss",
+                    auto_avg_group_size=None,
+                    auto_threshold=None,
+                    auto_search_avg_group_threshold=None,
                     metric=args.metric,
                     dim=args.dim,
                     nb=args.nb,

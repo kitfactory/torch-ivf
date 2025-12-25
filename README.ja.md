@@ -1,4 +1,4 @@
-﻿# torch-ivf（日本語）
+# torch-ivf（日本語）
 
 **Faiss ライクに使える、PyTorch ネイティブ IVF。**  
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
@@ -26,7 +26,8 @@ from torch_ivf.index import IndexFlatL2, IndexFlatIP, IndexIVFFlat
 | IVF（L2/IP） | `faiss.IndexIVFFlat` | `torch_ivf.index.IndexIVFFlat` |
 | 速度チューニング | `nprobe` 等 | `nprobe` + `search_mode` + `max_codes` |
 
-**GPU 推奨設定**：`search_mode="auto"`（tiny-batch は軽い経路、throughput は `csr`）
+**GPU 推奨設定**：`search_mode="auto"`（tiny-batch は軽い経路、throughput は `csr`）  
+切り替え基準: `avg_group_size = (nq * nprobe) / nlist`、`avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` なら `csr`（CUDA のみ）。
 
 ---
 
