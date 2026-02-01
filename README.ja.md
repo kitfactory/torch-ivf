@@ -57,6 +57,8 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 
 > 条件: `nb=262144, train_n=20480, d=128, nlist=512, nprobe=32, k=20, max_codes=0, --warmup 1 --repeat 5`  
 > 更新日時: `2026-02-01T14:47:02`（`scripts/benchmark_sweep_ivf_params.py`、torch-ivf / faiss-cpu を同一 base/query で計測）
+>
+> 注: `(nlist, nprobe)` やデータ分布によってはさらに大きい比率も出ます。ここは代表点として扱い、スイープ結果は `benchmarks/benchmarks.jsonl` を参照してください。
 
 | library | device | dtype | search_mode | QPS |
 |---|---|---|---|---:|

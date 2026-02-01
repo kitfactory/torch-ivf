@@ -57,6 +57,8 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 
 > Setup: `nb=262144, train_n=20480, d=128, nlist=512, nprobe=32, k=20, max_codes=0, --warmup 1 --repeat 5`  
 > Updated: `2026-02-01T14:47:02` (`scripts/benchmark_sweep_ivf_params.py`, same base/query for both libraries)
+>
+> Note: higher ratios can be possible depending on `(nlist, nprobe)` and your data distribution; treat this as a representative point and consult `benchmarks/benchmarks.jsonl` for sweeps.
 
 | library | device | dtype | search_mode | QPS |
 |---|---|---|---|---:|
