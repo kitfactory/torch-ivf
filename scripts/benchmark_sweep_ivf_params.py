@@ -7,6 +7,10 @@
 Usage:
   uv run python scripts/benchmark_sweep_ivf_params.py --torch-device cuda --pairs 512:32,256:16,128:8,1024:64
   uv run python scripts/benchmark_sweep_ivf_params.py --torch-device cuda --dtype float16 --pairs 512:32
+
+Real data (.npy):
+  uv run python scripts/benchmark_sweep_ivf_params.py --torch-device cuda --dtype float16 --pairs 512:32 ^
+    --base-npy path\\to\\base.npy --query-npy path\\to\\query.npy --dataset mydata
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ class ParamSweepResult:
     device: str
     device_name: str
     backend: str
+    dataset: str
     search_mode: str
     chosen_mode: str
     metric: str
@@ -79,6 +84,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pairs", default="512:32,256:16,128:8,1024:64", help="comma separated nlist:nprobe pairs")
     p.add_argument("--torch-device", default="cuda", help="torch device string (default: cuda)")
     p.add_argument("--torch-search-mode", choices=["csr", "matrix", "auto"], default="csr")
+    p.add_argument("--dataset", default="synthetic", help="label stored in JSONL (no file paths are recorded)")
+    p.add_argument("--base-npy", default=None, help="real data base vectors (.npy, shape [nb, dim])")
+    p.add_argument("--query-npy", default=None, help="real data query vectors (.npy, shape [nq, dim])")
+    p.add_argument("--train-npy", default=None, help="optional training vectors (.npy, shape [train_n, dim])")
     p.add_argument("--jsonl", default="benchmarks/benchmarks.jsonl", help="append results to this JSONL file")
     p.add_argument("--skip-faiss", action="store_true", help="skip faiss-cpu benchmark")
     p.add_argument(
@@ -126,6 +135,16 @@ def _parse_pairs(text: str) -> list[tuple[int, int]]:
     return out
 
 
+def _load_npy(path: str) -> np.ndarray:
+    # Use mmap for large datasets; slices are materialized as needed.
+    arr = np.load(path, mmap_mode="r")
+    if not isinstance(arr, np.ndarray):
+        raise TypeError(f"expected .npy array, got {type(arr)}")
+    if arr.ndim != 2:
+        raise ValueError(f"expected 2D array [n, d], got shape={arr.shape}")
+    return arr
+
+
 def _time_torch_search(
     index: IndexIVFFlat,
     xq: torch.Tensor,
@@ -164,6 +183,7 @@ def main() -> None:
     args = parse_args()
     torch_device = torch.device(args.torch_device)
     pairs = _parse_pairs(args.pairs)
+    dataset = str(args.dataset)
 
     if not args.skip_faiss and int(args.faiss_threads) != 0:
         threads = (os.cpu_count() or 0) if int(args.faiss_threads) == -1 else int(args.faiss_threads)
@@ -171,16 +191,58 @@ def main() -> None:
             faiss.omp_set_num_threads(int(threads))
 
     # Data: same base/query for both libraries.
-    rng = np.random.default_rng(args.seed)
-    base_np = rng.standard_normal((args.nb, args.dim), dtype=np.float32)
-    queries_np = rng.standard_normal((args.nq, args.dim), dtype=np.float32)
-    train_n = max(1, min(int(args.nb), int(args.train_n)))
-    train_np = base_np[:train_n]
+    if args.base_npy and args.query_npy:
+        base_all = _load_npy(args.base_npy)
+        queries_all = _load_npy(args.query_npy)
+        train_all = _load_npy(args.train_npy) if args.train_npy else None
+
+        dim = int(base_all.shape[1])
+        if int(queries_all.shape[1]) != dim:
+            raise ValueError(f"dim mismatch: base dim={dim}, query dim={int(queries_all.shape[1])}")
+        if train_all is not None and int(train_all.shape[1]) != dim:
+            raise ValueError(f"dim mismatch: base dim={dim}, train dim={int(train_all.shape[1])}")
+        if int(args.dim) != dim:
+            raise ValueError(f"--dim={args.dim} but loaded data has dim={dim}")
+
+        nb = int(base_all.shape[0]) if int(args.nb) <= 0 else min(int(args.nb), int(base_all.shape[0]))
+        nq = int(queries_all.shape[0]) if int(args.nq) <= 0 else min(int(args.nq), int(queries_all.shape[0]))
+        base_np = np.ascontiguousarray(base_all[:nb], dtype=np.float32)
+        queries_np = np.ascontiguousarray(queries_all[:nq], dtype=np.float32)
+
+        # Training pool size:
+        # - fixed train-n (>0): use that many points for all pairs
+        # - train-n=0: allocate an upper bound sufficient for the largest nlist in --pairs
+        if int(args.train_n) > 0:
+            train_pool_n = int(args.train_n)
+        else:
+            train_pool_n = max(max(nlist * 2, nlist + 1) for nlist, _ in pairs)
+
+        if train_all is None:
+            train_pool_n = min(train_pool_n, nb)
+            train_pool_np = np.ascontiguousarray(base_all[:train_pool_n], dtype=np.float32)
+        else:
+            train_pool_n = min(train_pool_n, int(train_all.shape[0]))
+            train_pool_np = np.ascontiguousarray(train_all[:train_pool_n], dtype=np.float32)
+
+        # Update record fields to reflect actual slices used.
+        args.nb = nb
+        args.nq = nq
+        args.dim = dim
+    else:
+        rng = np.random.default_rng(args.seed)
+        base_np = rng.standard_normal((args.nb, args.dim), dtype=np.float32)
+        queries_np = rng.standard_normal((args.nq, args.dim), dtype=np.float32)
+        if int(args.train_n) > 0:
+            train_pool_n = min(int(args.nb), int(args.train_n))
+        else:
+            train_pool_n = min(int(args.nb), max(max(nlist * 2, nlist + 1) for nlist, _ in pairs))
+        train_pool_n = max(1, int(train_pool_n))
+        train_pool_np = np.ascontiguousarray(base_np[:train_pool_n], dtype=np.float32)
 
     torch_dtype = getattr(torch, args.dtype)
     xb = torch.from_numpy(base_np).to(device=torch_device, dtype=torch_dtype)
     xq = torch.from_numpy(queries_np).to(device=torch_device, dtype=torch_dtype)
-    train_x = xb[:train_n]
+    train_x_pool = torch.from_numpy(train_pool_np).to(device=torch_device, dtype=torch_dtype)
 
     warmup = max(0, int(args.warmup))
     repeat = max(1, int(args.repeat))
@@ -191,6 +253,10 @@ def main() -> None:
     records: list[ParamSweepResult] = []
 
     for nlist, nprobe in pairs:
+        train_n = int(args.train_n) if int(args.train_n) > 0 else max(nlist * 2, nlist + 1)
+        train_n = max(1, min(int(train_pool_np.shape[0]), int(train_n)))
+        train_x = train_x_pool[:train_n]
+
         # torch-ivf
         torch_index = IndexIVFFlat(
             args.dim,
@@ -236,6 +302,7 @@ def main() -> None:
                 device=str(torch_device),
                 device_name=_device_name(torch_device),
                 backend=_detect_backend(torch_device),
+                dataset=dataset,
                 search_mode=args.torch_search_mode,
                 chosen_mode=chosen_mode,
                 metric=args.metric,
@@ -268,7 +335,7 @@ def main() -> None:
             faiss_index = faiss.IndexIVFFlat(quantizer, args.dim, nlist, metric)
 
             t0 = time.perf_counter()
-            faiss_index.train(train_np)
+            faiss_index.train(train_pool_np[:train_n])
             t1 = time.perf_counter()
             faiss_index.add(base_np)
             t2 = time.perf_counter()
@@ -287,6 +354,7 @@ def main() -> None:
                     device="cpu",
                     device_name=platform.processor() or "CPU",
                     backend="faiss-cpu",
+                    dataset=dataset,
                     search_mode="faiss",
                     chosen_mode="faiss",
                     metric=args.metric,
