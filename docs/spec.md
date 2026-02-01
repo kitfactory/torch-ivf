@@ -21,7 +21,7 @@
 ## 3. Terminology
 - `xb`: base vectors (float16/float32/bfloat16 Tensor).
 - `xq`: query vectors.
-- `quantizer`: coarse centroid を保持する仕組み。現実装（v0.1.0）では `quantizer` オブジェクトは公開せず、`IndexIVFFlat` が centroid を保持する。
+- `quantizer`: coarse centroid を保持する仕組み。現実装（v0.1.1）では `quantizer` オブジェクトは公開せず、`IndexIVFFlat` が centroid を保持する。
 - `list_offsets`: inverted list の prefix sum。`packed_embeddings` と組み合わせて candidate を取り出す。
 
 ## 4. Module Layout & API
@@ -479,7 +479,7 @@ def search_ivf_csr(
 - 条件: `search(xq, k, *, params: Optional[SearchParams] = None)` を呼び出す。
 - 振る舞い（現実装）:
   - `params is None` の場合、`IndexIVFFlat` の設定（`nprobe/max_codes/approximate_mode`）と既定値から検索設定を解決する。
-  - `profile` は入力バリデーション用の値であり、`exact/speed/approx` 自体は挙動を切り替えない（v0.1.0）。
+  - `profile` は入力バリデーション用の値であり、`exact/speed/approx` 自体は挙動を切り替えない（v0.1.1）。
   - `profile="approx_fast" / "approx_balanced" / "approx_quality"` は近似プリセットとして扱い、`approximate=True` と `use_per_list_sizes=True` を適用する。`candidate_budget` が未指定の場合のみ既定値（32,768 / 65,536 / 131,072）を補う。
 - SearchParams の構成（後方互換）:
   - `profile: Literal["exact","speed","approx","approx_fast","approx_balanced","approx_quality"] = "speed"`
@@ -489,7 +489,7 @@ def search_ivf_csr(
   - `max_codes: Optional[int] = None`
   - `candidate_budget: Optional[int] = None`
   - `budget_strategy: Literal["uniform","distance_weighted"] = "distance_weighted"`
-  - `list_ordering: Optional[Literal["none","residual_norm_asc","proj_desc"]] = None`（v0.1.0/P1 では `residual_norm_asc` のみ実装）
+  - `list_ordering: Optional[Literal["none","residual_norm_asc","proj_desc"]] = None`（v0.1.1/P1 では `residual_norm_asc` のみ実装）
   - `rebuild_policy: Literal["manual","auto_threshold"] = "manual"`
   - `rebuild_threshold_adds: int = 0`
   - `dynamic_nprobe: bool = False`
@@ -515,7 +515,7 @@ def search_ivf_csr(
 ### 12.9 Safe pruning（L2）（Spec ID: PERF-6a.1）
 - 前提: 結果不変（Exact）のまま候補削減を行いたい。
 - 条件: `metric="l2"` かつ `safe_pruning=True` の場合。
-- 振る舞い（現実装）: v0.1.0 では `safe_pruning` は **受け付けるが効果はない**（検索結果にも速度にも影響しない）。
+- 振る舞い（現実装）: v0.1.1 では `safe_pruning` は **受け付けるが効果はない**（検索結果にも速度にも影響しない）。
 - 振る舞い（将来）: list ごとに `list_radius`（centroid からの最大残差ノルム上界）を保持し、`lb(l) = max(0, ||q - c_l|| - r_l)^2` を用いて `kth_best` より大きい list をスキップする（結果不変）。
 - 補足: `metric="ip"` の場合は Phase 2 で別途定義する。
 
@@ -550,19 +550,19 @@ def search_ivf_csr(
 ### 12.12 list ordering / rebuild（Spec ID: PERF-6b.2）
 - 前提: `approximate=True` かつ `max_codes` / `candidate_budget` により partial scan が発生する。
 - 条件: `list_ordering` と `rebuild_policy` を解釈する。
-- 振る舞い（現実装）: v0.1.0（Phase P1）では `metric="l2"` のみ対象とし、`list_ordering` は `residual_norm_asc` のみをサポートする（`proj_desc` は Phase 2 で扱う）。
+- 振る舞い（現実装）: v0.1.1（Phase P1）では `metric="l2"` のみ対象とし、`list_ordering` は `residual_norm_asc` のみをサポートする（`proj_desc` は Phase 2 で扱う）。
   - `list_ordering=None` の場合、`approximate=True` かつ `metric="l2"` では既定で `residual_norm_asc` を適用する。
   - `list_ordering="none"` は並べ替えを行わない（内部的には `None` と同義）。
   - `residual_norm_asc`: L2 の場合、`r = x - c` の `||r||` 昇順で並べる。
 - `rebuild_policy`:
   - `manual`: ユーザーが `rebuild_lists()` を呼ぶまで並べ替えを行わない。
   - `auto_threshold`: `add` の累積が `rebuild_threshold_adds` を超えたら `search` 内で rebuild を実行できる。
-- 補足（現実装）: v0.1.0 では “unsorted tail” を保持しない。`rebuild_lists()` は index の `packed_embeddings/packed_norms/list_ids` を **その場で並べ替える**。
+- 補足（現実装）: v0.1.1 では “unsorted tail” を保持しない。`rebuild_lists()` は index の `packed_embeddings/packed_norms/list_ids` を **その場で並べ替える**。
 
 ### 12.13 品質ゲート（Spec ID: PERF-6b.3）
 - 前提: `approximate=True` の設定を出荷する。
 - 条件: `recall@k` を **同一 IVF・`max_codes=0`・`approximate=False`** のベースラインと比較する。
-- 振る舞い（現実装）: v0.1.0 では品質ゲートによる自動無効化 / fallback は行わない（ユーザーがベンチ結果を見て設定する）。
+- 振る舞い（現実装）: v0.1.1 では品質ゲートによる自動無効化 / fallback は行わない（ユーザーがベンチ結果を見て設定する）。
 - 振る舞い（将来）: `candidate_budget` のプリセットに対して下限を満たさない設定は無効化または fallback する。
   - `approx_64k`: `recall@k >= 0.995`
   - `approx_32k`: `recall@k >= 0.990`
@@ -572,12 +572,12 @@ def search_ivf_csr(
 ### 12.14 subcluster bound（Spec ID: PERF-6a.2）
 - 前提: 結果不変（Exact）で候補削減を行いたい。
 - 条件: list 内を `k_sub` で分割し、`sub_centroid` と `sub_radius` を保持する。
-- 振る舞い（現実装）: v0.1.0 では未実装。
+- 振る舞い（現実装）: v0.1.1 では未実装。
 - 振る舞い（将来）: L2 では `lower_bound(q, sub) = ||q - sub_centroid|| - sub_radius` を用いて、現在の k 番目より大きい subcluster をスキップする（結果は不変）。
 - 補足: IP での上界/下界は別途定義が必要なため、初期実装は L2 のみ対象とする。
 
 ### 12.15 anchors プレフィルタ（Spec ID: PERF-6b.4）
 - 前提: `approximate=True` で list の候補数をさらに減らしたい。
 - 条件: 各 list に小さな代表集合（anchors）を保持する。既定は 64 とし、`avg_list_size < 64` の場合は `min(32, avg_list_size)` へ自動縮退する。
-- 振る舞い（現実装）: v0.1.0 では未実装。
+- 振る舞い（現実装）: v0.1.1 では未実装。
 - 振る舞い（将来）: anchor の距離で見込みのある list を選び、`candidate_budget` を割り当てる対象を減らす。
