@@ -201,8 +201,8 @@ def main() -> None:
             raise ValueError(f"dim mismatch: base dim={dim}, query dim={int(queries_all.shape[1])}")
         if train_all is not None and int(train_all.shape[1]) != dim:
             raise ValueError(f"dim mismatch: base dim={dim}, train dim={int(train_all.shape[1])}")
-        if int(args.dim) != dim:
-            raise ValueError(f"--dim={args.dim} but loaded data has dim={dim}")
+        # Trust the loaded arrays for dim; keep --dim mainly for the synthetic path.
+        args.dim = dim
 
         nb = int(base_all.shape[0]) if int(args.nb) <= 0 else min(int(args.nb), int(base_all.shape[0]))
         nq = int(queries_all.shape[0]) if int(args.nq) <= 0 else min(int(args.nq), int(queries_all.shape[0]))
@@ -227,7 +227,6 @@ def main() -> None:
         # Update record fields to reflect actual slices used.
         args.nb = nb
         args.nq = nq
-        args.dim = dim
     else:
         rng = np.random.default_rng(args.seed)
         base_np = rng.standard_normal((args.nb, args.dim), dtype=np.float32)
