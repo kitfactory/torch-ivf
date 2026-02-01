@@ -206,8 +206,10 @@ def main() -> None:
 
         nb = int(base_all.shape[0]) if int(args.nb) <= 0 else min(int(args.nb), int(base_all.shape[0]))
         nq = int(queries_all.shape[0]) if int(args.nq) <= 0 else min(int(args.nq), int(queries_all.shape[0]))
-        base_np = np.ascontiguousarray(base_all[:nb], dtype=np.float32)
-        queries_np = np.ascontiguousarray(queries_all[:nq], dtype=np.float32)
+        # Force a writable CPU array. np.load(..., mmap_mode='r') returns read-only memmap;
+        # torch.from_numpy warns on non-writable arrays.
+        base_np = np.array(base_all[:nb], dtype=np.float32, copy=True, order="C")
+        queries_np = np.array(queries_all[:nq], dtype=np.float32, copy=True, order="C")
 
         # Training pool size:
         # - fixed train-n (>0): use that many points for all pairs
@@ -219,10 +221,10 @@ def main() -> None:
 
         if train_all is None:
             train_pool_n = min(train_pool_n, nb)
-            train_pool_np = np.ascontiguousarray(base_all[:train_pool_n], dtype=np.float32)
+            train_pool_np = np.array(base_all[:train_pool_n], dtype=np.float32, copy=True, order="C")
         else:
             train_pool_n = min(train_pool_n, int(train_all.shape[0]))
-            train_pool_np = np.ascontiguousarray(train_all[:train_pool_n], dtype=np.float32)
+            train_pool_np = np.array(train_all[:train_pool_n], dtype=np.float32, copy=True, order="C")
 
         # Update record fields to reflect actual slices used.
         args.nb = nb
