@@ -5,7 +5,7 @@ The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with
 
 - 🔁 **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
 - 📈 **18.6x vs faiss-cpu (throughput, exact)** (`nq=19600`, `search_mode=csr`, torch-ivf `float16` on ROCm GPU vs faiss-cpu `float32`: 195,175 / 10,479 ~18.6x)
-- 📈 **6.83x vs faiss-cpu (throughput, default-friendly)** (`nq=19600`, `search_mode=auto`, float32: 69,632 / 10,196 ~6.83x)
+- 📈 **10.0x vs faiss-cpu (throughput, default-friendly)** (`nq=19600`, `search_mode=auto`, float32: 99,568 / 9,987 ~10.0x)
 - 🧩 **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
 - 🧪 **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
 
@@ -70,16 +70,25 @@ uv run python scripts/benchmark_sweep_ivf_params.py --torch-device cuda --torch-
 
 > Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > Environment: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
-> Updated: `2025-12-25T15:32:17` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
+> Updated: `2026-02-01T16:01:05` (`scripts/benchmark_sweep_nq.py`, `search_ms` is median)
 >
 > Note: this table is **fixed to `search_mode=auto`** to show the recommended default (auto picks a lighter path for tiny batches and `csr` for throughput). For maximum throughput, set `search_mode=csr`.
 > faiss-cpu uses the default thread settings (environment-dependent). For reproducibility, fix `OMP_NUM_THREADS` (e.g. Linux/macOS `export OMP_NUM_THREADS=16` / Windows `set OMP_NUM_THREADS=16`).
 
 | nq | torch-ivf (ROCm GPU, auto) | faiss-cpu (CPU) |
 |---:|---:|---:|
-| 512 | **16,078 QPS** | 6,419 QPS |
-| 2,048 | **36,831 QPS** | 8,352 QPS |
-| 19,600 | **69,632 QPS** | 10,196 QPS |
+| 512 | **24,032 QPS** | 6,264 QPS |
+| 2,048 | **51,328 QPS** | 8,564 QPS |
+| 19,600 | **99,568 QPS** | 9,987 QPS |
+
+### Progress (vs v0.1.0)
+
+Same setup (throughput, `nq=19600`, `search_mode=auto`, float32):
+
+| version | torch-ivf QPS | faiss-cpu QPS | ratio |
+|---|---:|---:|---:|
+| v0.1.0 (`2025-12-25T15:32:17`) | 69,632 | 10,196 | 6.83x |
+| v0.1.1 (`2026-02-01T16:01:05`) | 99,568 | 9,987 | 9.97x |
 
 **Speed-leaning params (optional; recall trade-off)**  
 If you report QPS with these, include the exact params alongside the numbers.

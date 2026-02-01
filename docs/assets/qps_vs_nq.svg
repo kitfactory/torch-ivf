@@ -7,29 +7,27 @@
     QPS vs nq (ROCm GPU: torch-ivf matrix/csr/auto)
   </text>
   <text x="450" y="52" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12" fill="#444444">
-    nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32 (median)
+    nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32 (median, 2026-02-01T16:01:05)
   </text>
 
   <!-- Plot area -->
   <rect x="70" y="70" width="810" height="380" fill="#ffffff" stroke="#cccccc" stroke-width="1"/>
 
-  <!-- Grid + Y ticks (0..70000 step 10000) -->
-  <!-- y = 70 + (1 - v/70000) * 380 -->
+  <!-- Grid + Y ticks (0..120000 step 20000) -->
+  <!-- y = 70 + (1 - v/120000) * 380 -->
   <g font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12" fill="#333333">
     <line x1="70" y1="70.000" x2="880" y2="70.000" stroke="#eeeeee" stroke-width="1"/>
-    <text x="62" y="74.000" text-anchor="end">70000</text>
-    <line x1="70" y1="124.286" x2="880" y2="124.286" stroke="#eeeeee" stroke-width="1"/>
-    <text x="62" y="128.286" text-anchor="end">60000</text>
-    <line x1="70" y1="178.571" x2="880" y2="178.571" stroke="#eeeeee" stroke-width="1"/>
-    <text x="62" y="182.571" text-anchor="end">50000</text>
-    <line x1="70" y1="232.857" x2="880" y2="232.857" stroke="#eeeeee" stroke-width="1"/>
-    <text x="62" y="236.857" text-anchor="end">40000</text>
-    <line x1="70" y1="287.143" x2="880" y2="287.143" stroke="#eeeeee" stroke-width="1"/>
-    <text x="62" y="291.143" text-anchor="end">30000</text>
-    <line x1="70" y1="341.429" x2="880" y2="341.429" stroke="#eeeeee" stroke-width="1"/>
-    <text x="62" y="345.429" text-anchor="end">20000</text>
-    <line x1="70" y1="395.714" x2="880" y2="395.714" stroke="#eeeeee" stroke-width="1"/>
-    <text x="62" y="399.714" text-anchor="end">10000</text>
+    <text x="62" y="74.000" text-anchor="end">120000</text>
+    <line x1="70" y1="133.333" x2="880" y2="133.333" stroke="#eeeeee" stroke-width="1"/>
+    <text x="62" y="137.333" text-anchor="end">100000</text>
+    <line x1="70" y1="196.667" x2="880" y2="196.667" stroke="#eeeeee" stroke-width="1"/>
+    <text x="62" y="200.667" text-anchor="end">80000</text>
+    <line x1="70" y1="260.000" x2="880" y2="260.000" stroke="#eeeeee" stroke-width="1"/>
+    <text x="62" y="264.000" text-anchor="end">60000</text>
+    <line x1="70" y1="323.333" x2="880" y2="323.333" stroke="#eeeeee" stroke-width="1"/>
+    <text x="62" y="327.333" text-anchor="end">40000</text>
+    <line x1="70" y1="386.667" x2="880" y2="386.667" stroke="#eeeeee" stroke-width="1"/>
+    <text x="62" y="390.667" text-anchor="end">20000</text>
     <line x1="70" y1="450.000" x2="880" y2="450.000" stroke="#eeeeee" stroke-width="1"/>
     <text x="62" y="454.000" text-anchor="end">0</text>
   </g>
@@ -58,66 +56,66 @@
   <text x="18" y="260" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="13" fill="#111111" transform="rotate(-90 18 260)">QPS</text>
 
   <!-- Data -->
-  <!-- torch-ivf matrix (#1f77b4): [784.56, 2531.806, 2927.4, 3275.073, 3456.832, 3385.258, 3291.883] -->
-  <!-- torch-ivf csr (#d00000): [886.525, 2592.101, 1107.312, 4431.98, 16250.718, 37391.914, 69206.718] -->
-  <!-- torch-ivf auto (#2ca02c): [882.457, 2405.364, 3074.026, 4477.889, 16077.928, 36831.286, 69632.119] -->
-  <!-- y = 70 + (1 - v/70000) * 380 -->
+  <!-- torch-ivf matrix (#1f77b4): [1015.538, 2243.536, 2875.5, 3391.079, 3495.355, 3540.099, 3559.706] -->
+  <!-- torch-ivf csr (#d00000): [1143.903, 2680.516, 1948.819, 6823.282, 24965.137, 51055.386, 100632.031] -->
+  <!-- torch-ivf auto (#2ca02c): [1135.718, 2665.156, 3217.18, 6698.029, 24031.692, 51327.549, 99567.592] -->
+  <!-- y = 70 + (1 - v/120000) * 380 -->
 
   <!-- Lines -->
   <polyline fill="none" stroke="#1f77b4" stroke-width="2.5"
     points="
-      70.000,445.741
-      205.000,436.256
-      340.000,434.108
-      475.000,432.221
-      610.000,431.234
-      745.000,431.623
-      880.000,432.130
+      70.000,446.784
+      205.000,442.895
+      340.000,440.894
+      475.000,439.262
+      610.000,438.931
+      745.000,438.790
+      880.000,438.728
     "/>
   <polyline fill="none" stroke="#d00000" stroke-width="2.5"
     points="
-      70.000,445.187
-      205.000,435.929
-      340.000,443.989
-      475.000,425.941
-      610.000,361.782
-      745.000,247.015
-      880.000,74.306
+      70.000,446.378
+      205.000,441.512
+      340.000,443.829
+      475.000,428.393
+      610.000,370.944
+      745.000,288.325
+      880.000,131.332
     "/>
   <polyline fill="none" stroke="#2ca02c" stroke-width="2.5"
     points="
-      70.000,445.210
-      205.000,436.942
-      340.000,433.312
-      475.000,425.691
-      610.000,362.720
-      745.000,250.059
-      880.000,71.997
+      70.000,446.404
+      205.000,441.560
+      340.000,439.812
+      475.000,428.790
+      610.000,373.900
+      745.000,287.463
+      880.000,134.703
     "/>
 
   <!-- Markers -->
   <g>
-    <circle cx="70.000" cy="445.741" r="3.5" fill="#1f77b4"/>
-    <circle cx="205.000" cy="436.256" r="3.5" fill="#1f77b4"/>
-    <circle cx="340.000" cy="434.108" r="3.5" fill="#1f77b4"/>
-    <circle cx="475.000" cy="432.221" r="3.5" fill="#1f77b4"/>
-    <circle cx="610.000" cy="431.234" r="3.5" fill="#1f77b4"/>
-    <circle cx="745.000" cy="431.623" r="3.5" fill="#1f77b4"/>
-    <circle cx="880.000" cy="432.130" r="3.5" fill="#1f77b4"/>
-    <circle cx="70.000" cy="445.187" r="3.5" fill="#d00000"/>
-    <circle cx="205.000" cy="435.929" r="3.5" fill="#d00000"/>
-    <circle cx="340.000" cy="443.989" r="3.5" fill="#d00000"/>
-    <circle cx="475.000" cy="425.941" r="3.5" fill="#d00000"/>
-    <circle cx="610.000" cy="361.782" r="3.5" fill="#d00000"/>
-    <circle cx="745.000" cy="247.015" r="3.5" fill="#d00000"/>
-    <circle cx="880.000" cy="74.306" r="3.5" fill="#d00000"/>
-    <circle cx="70.000" cy="445.210" r="3.5" fill="#2ca02c"/>
-    <circle cx="205.000" cy="436.942" r="3.5" fill="#2ca02c"/>
-    <circle cx="340.000" cy="433.312" r="3.5" fill="#2ca02c"/>
-    <circle cx="475.000" cy="425.691" r="3.5" fill="#2ca02c"/>
-    <circle cx="610.000" cy="362.720" r="3.5" fill="#2ca02c"/>
-    <circle cx="745.000" cy="250.059" r="3.5" fill="#2ca02c"/>
-    <circle cx="880.000" cy="71.997" r="3.5" fill="#2ca02c"/>
+    <circle cx="70.000" cy="446.784" r="3.5" fill="#1f77b4"/>
+    <circle cx="205.000" cy="442.895" r="3.5" fill="#1f77b4"/>
+    <circle cx="340.000" cy="440.894" r="3.5" fill="#1f77b4"/>
+    <circle cx="475.000" cy="439.262" r="3.5" fill="#1f77b4"/>
+    <circle cx="610.000" cy="438.931" r="3.5" fill="#1f77b4"/>
+    <circle cx="745.000" cy="438.790" r="3.5" fill="#1f77b4"/>
+    <circle cx="880.000" cy="438.728" r="3.5" fill="#1f77b4"/>
+    <circle cx="70.000" cy="446.378" r="3.5" fill="#d00000"/>
+    <circle cx="205.000" cy="441.512" r="3.5" fill="#d00000"/>
+    <circle cx="340.000" cy="443.829" r="3.5" fill="#d00000"/>
+    <circle cx="475.000" cy="428.393" r="3.5" fill="#d00000"/>
+    <circle cx="610.000" cy="370.944" r="3.5" fill="#d00000"/>
+    <circle cx="745.000" cy="288.325" r="3.5" fill="#d00000"/>
+    <circle cx="880.000" cy="131.332" r="3.5" fill="#d00000"/>
+    <circle cx="70.000" cy="446.404" r="3.5" fill="#2ca02c"/>
+    <circle cx="205.000" cy="441.560" r="3.5" fill="#2ca02c"/>
+    <circle cx="340.000" cy="439.812" r="3.5" fill="#2ca02c"/>
+    <circle cx="475.000" cy="428.790" r="3.5" fill="#2ca02c"/>
+    <circle cx="610.000" cy="373.900" r="3.5" fill="#2ca02c"/>
+    <circle cx="745.000" cy="287.463" r="3.5" fill="#2ca02c"/>
+    <circle cx="880.000" cy="134.703" r="3.5" fill="#2ca02c"/>
   </g>
 
   <!-- Legend -->
