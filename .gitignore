@@ -21,5 +21,8 @@ coverage.xml
 # Node / tooling
 node_modules/
 
+# Codex local config
+.codex/
+
 # Local datasets / large artifacts
 data/

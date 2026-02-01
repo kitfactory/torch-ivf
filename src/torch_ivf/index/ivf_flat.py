@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import os
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -8,6 +9,13 @@ import torch
 
 from ..nn import kmeans
 from .base import IndexBase, MetricType
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 @dataclass(frozen=True)
@@ -113,6 +121,8 @@ class IndexIVFFlat(IndexBase):
         self._list_sizes_cpu: list[int] | None = None
         self._effective_max_codes_cache: int | None = None
         self._workspace = _Workspace()
+        self._expl_tbuf_enabled = _env_flag("TORCH_IVF_EXPL_TBUF")
+        self._csr_buf_blocked_enabled = _env_flag("TORCH_IVF_CSR_BUF_BLOCKED")
         self._nprobe = 1
         self.nprobe = nprobe or min(8, self._nlist)
         self._max_codes = 0
@@ -703,7 +713,6 @@ class IndexIVFFlat(IndexBase):
 
         self._list_ordering = ordering
         self._adds_since_rebuild = 0
-
     def _invalidate_search_cache(self) -> None:
         self._centroids_t = None
         self._centroid_norm2 = None
@@ -1186,10 +1195,14 @@ class IndexIVFFlat(IndexBase):
             groups_cpu = torch.cat([groups, group_max.unsqueeze(1)], dim=1).to("cpu")
         if groups_cpu.numel() == 0:
             return groups_cpu
-        mask = groups_cpu[:, 1] != groups_cpu[:, 2]
-        if bool(mask.all()):
+        groups_cpu = groups_cpu.contiguous()
+        groups_np = groups_cpu.numpy()
+        if groups_np.size == 0:
             return groups_cpu
-        return groups_cpu[mask]
+        keep = groups_np[:, 1] != groups_np[:, 2]
+        if bool(keep.all()):
+            return groups_cpu
+        return torch.from_numpy(groups_np[keep])
 
     def _build_candidate_index_matrix_from_lists(
         self,
@@ -1403,7 +1416,13 @@ class IndexIVFFlat(IndexBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if top_lists is None:
             top_lists = self._top_probed_lists(xq, nprobe=nprobe)
-        chunks = self._iter_query_chunks_csr(xq.shape[0], nprobe=nprobe)
+        chunks = self._iter_query_chunks_csr(
+            xq.shape[0],
+            nprobe=nprobe,
+            max_codes=max_codes,
+            per_list_sizes=per_list_sizes,
+            k=k,
+        )
         if debug_stats is not None:
             debug_stats["chunks"] = int(len(chunks))
             counts = self._estimate_candidates_per_query(
@@ -1915,6 +1934,217 @@ class IndexIVFFlat(IndexBase):
                     debug_stats["blocked_merge_calls"] = int(debug_stats.get("blocked_merge_calls", 0)) + 1
         return True
 
+    def _search_csr_buffered_fill_tasks_blocked(
+        self,
+        q_tasks: torch.Tensor,
+        q2_tasks: torch.Tensor | None,
+        tasks_q: torch.Tensor,
+        task_sizes: torch.Tensor | None,
+        groups_cpu: torch.Tensor,
+        k: int,
+        *,
+        task_scores: torch.Tensor,
+        task_packed: torch.Tensor,
+        fill: float,
+        debug_stats: dict[str, float | int | str] | None,
+    ) -> torch.Tensor | None:
+        # CSR bufferedの「listごと matmul/topk」を複数listまとめて bmm/topk に変換する。
+        # Convert per-list matmul/topk into batched bmm/topk over multiple lists (CSR buffered).
+        if q2_tasks is None:
+            return None
+        if self.metric != "l2":
+            return None
+        if self.device.type == "cpu":
+            return None
+        if groups_cpu.numel() == 0:
+            return None
+
+        block_size = self._csr_list_block_size()
+        if block_size <= 1:
+            return None
+        pad_ratio_limit = float(self._csr_block_pad_ratio_limit())
+        max_block_elements = int(self._csr_block_max_elements())
+        cost_ratio_limit = float(self._csr_block_cost_ratio_limit())
+
+        vec_chunk = self._csr_vec_chunk(buffered=True)
+        offsets_cpu = (
+            self._list_offsets_cpu
+            if len(self._list_offsets_cpu) == self._nlist + 1
+            else self._list_offsets.to("cpu").tolist()
+        )
+        device = self.device
+        d = self.d
+
+        # entry: (gsize, list_len, group_row, list_id, s, e, a, b)
+        group_entries: list[tuple[int, int, int, int, int, int, int, int]] = []
+        groups_np = groups_cpu.numpy()
+        for group_row, (l, start, end, max_len) in enumerate(groups_np):
+            s = int(start)
+            e = int(end)
+            if e <= s:
+                continue
+            list_id = int(l)
+            a = int(offsets_cpu[list_id])
+            b = int(offsets_cpu[list_id + 1])
+            if b <= a:
+                continue
+            gsize = e - s
+            if gsize <= 0:
+                continue
+            list_len = b - a
+            if max_len > 0 and max_len < list_len:
+                list_len = int(max_len)
+                b = a + list_len
+            if list_len <= 0:
+                continue
+            # Blocked path only supports "single matmul per list" for now.
+            if list_len > vec_chunk:
+                return None
+            group_entries.append((gsize, list_len, int(group_row), list_id, s, e, a, b))
+
+        if not group_entries:
+            return None
+
+        group_entries.sort(key=lambda v: (v[0], v[1]))
+
+        # Choose block sizes per block (not a single global size). This avoids being
+        # blocked by a few outlier lists with very large group sizes.
+        # ブロックサイズを全体で固定せず、ブロック単位で動的に選ぶ（外れ値の影響を局所化）。
+        base_candidates: list[int] = []
+        for size in (block_size, 16, 8, 4, 2):
+            if size > 1 and size <= block_size and size not in base_candidates:
+                base_candidates.append(size)
+
+        processed = torch.zeros((groups_cpu.shape[0],), dtype=torch.bool, device="cpu")
+        total_groups = len(group_entries)
+        used_groups = 0
+        used_blocks = 0
+
+        # Fill task_scores/task_packed in-place; they are already initialized.
+        i = 0
+        while i < len(group_entries):
+            remaining = len(group_entries) - i
+            # Try larger blocks first at this position.
+            chosen = 1
+            for size in base_candidates:
+                if size > remaining:
+                    continue
+                block = group_entries[i : i + size]
+                g_sizes = [info[0] for info in block]
+                l_sizes = [info[1] for info in block]
+                gmax = max(g_sizes)
+                lmax = max(l_sizes)
+                bcount = len(block)
+                cost_block = bcount * gmax * lmax
+                cost_list = sum(gs * ls for gs, ls in zip(g_sizes, l_sizes))
+                if cost_list <= 0:
+                    continue
+                if max_block_elements > 0 and cost_block > max_block_elements:
+                    continue
+                if cost_ratio_limit > 0 and cost_block > cost_list * cost_ratio_limit:
+                    continue
+                pad_ratio = cost_block / cost_list if cost_list > 0 else 0.0
+                if pad_ratio_limit > 0 and pad_ratio > pad_ratio_limit:
+                    continue
+                chosen = size
+                break
+
+            if chosen <= 1:
+                i += 1
+                continue
+
+            block = group_entries[i : i + chosen]
+            g_sizes = [info[0] for info in block]
+            l_sizes = [info[1] for info in block]
+            gmax = max(g_sizes)
+            lmax = max(l_sizes)
+            bcount = len(block)
+            used_groups += bcount
+            used_blocks += 1
+
+            q_pad = self._workspace.ensure("csr_buf_block_q", (bcount, gmax, d), dtype=self.dtype, device=device)
+            q2_pad = self._workspace.ensure("csr_buf_block_q2", (bcount, gmax), dtype=self.dtype, device=device)
+            x_pad = self._workspace.ensure("csr_buf_block_x", (bcount, lmax, d), dtype=self.dtype, device=device)
+            x2_pad = self._workspace.ensure("csr_buf_block_x2", (bcount, lmax), dtype=self.dtype, device=device)
+
+            # Per-task size cap (approx). For exact, we fill list_len.
+            sizes_pad = None
+            if task_sizes is not None:
+                sizes_pad = self._workspace.ensure(
+                    "csr_buf_block_sizes", (bcount, gmax), dtype=torch.long, device=device
+                )
+                sizes_pad.zero_()
+
+            lens_buf = self._workspace.ensure("csr_buf_block_lens", (bcount,), dtype=torch.long, device=device)
+            gsize_buf = self._workspace.ensure("csr_buf_block_gsizes", (bcount,), dtype=torch.long, device=device)
+            offsets_buf = self._workspace.ensure("csr_buf_block_offsets", (bcount,), dtype=torch.long, device=device)
+
+            offsets_list: list[int] = []
+            segments: list[tuple[int, int, int]] = []
+            for bi, (gsize, list_len, group_row, _list_id, s, e, a, b) in enumerate(block):
+                q_pad[bi, :gsize] = q_tasks[s:e]
+                q2_pad[bi, :gsize] = q2_tasks[s:e]
+                x_pad[bi, :list_len] = self._packed_embeddings[a:b]
+                x2_pad[bi, :list_len] = self._packed_norms[a:b]
+                if sizes_pad is not None:
+                    sizes_pad[bi, :gsize] = task_sizes[s:e]
+                offsets_list.append(a)
+                segments.append((s, e, list_len))
+                processed[group_row] = True
+
+            lens_buf[:bcount].copy_(torch.as_tensor(l_sizes, dtype=torch.long))
+            gsize_buf[:bcount].copy_(torch.as_tensor(g_sizes, dtype=torch.long))
+            offsets_buf[:bcount].copy_(torch.as_tensor(offsets_list, dtype=torch.long))
+
+            if debug_stats is not None:
+                debug_stats["buf_block_blocks"] = int(debug_stats.get("buf_block_blocks", 0)) + 1
+                debug_stats["buf_block_lists"] = int(debug_stats.get("buf_block_lists", 0)) + int(bcount)
+                debug_stats["matmul_calls"] = int(debug_stats.get("matmul_calls", 0)) + 1
+                debug_stats["topk_calls"] = int(debug_stats.get("topk_calls", 0)) + 1
+
+            prod = torch.bmm(q_pad, x_pad.transpose(1, 2))
+            dist = q2_pad.unsqueeze(2) + x2_pad.unsqueeze(1) - (2.0 * prod)
+            dist.clamp_min_(0)
+
+            list_pos = self._workspace.ensure("csr_buf_block_list_pos", (lmax,), dtype=torch.long, device=device)
+            torch.arange(lmax, device=device, out=list_pos)
+            list_mask = list_pos.unsqueeze(0) >= lens_buf[:bcount].unsqueeze(1)
+            dist.masked_fill_(list_mask.unsqueeze(1), float("inf"))
+
+            query_pos = self._workspace.ensure("csr_buf_block_query_pos", (gmax,), dtype=torch.long, device=device)
+            torch.arange(gmax, device=device, out=query_pos)
+            query_mask = query_pos.unsqueeze(0) >= gsize_buf[:bcount].unsqueeze(1)
+            dist.masked_fill_(query_mask.unsqueeze(2), float("inf"))
+
+            if sizes_pad is not None:
+                group_mask = list_pos.view(1, 1, lmax) >= sizes_pad[:bcount].unsqueeze(2)
+                dist.masked_fill_(group_mask, float("inf"))
+
+            topk = min(k, lmax)
+            cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=2, sorted=False)
+            offsets = offsets_buf[:bcount].view(bcount, 1, 1)
+            cand_packed = cand_j + offsets
+
+            for bi, (s, e, _list_len) in enumerate(segments):
+                gsize = e - s
+                if gsize <= 0:
+                    continue
+                task_scores[s:e, :topk] = cand_scores[bi, :gsize]
+                task_packed[s:e, :topk] = cand_packed[bi, :gsize]
+
+            i += chosen
+
+        if debug_stats is not None:
+            debug_stats["buf_block_groups_total"] = int(debug_stats.get("buf_block_groups_total", 0)) + int(total_groups)
+            debug_stats["buf_block_groups_used"] = int(debug_stats.get("buf_block_groups_used", 0)) + int(used_groups)
+            debug_stats["buf_block_used_blocks"] = int(debug_stats.get("buf_block_used_blocks", 0)) + int(used_blocks)
+            debug_stats["buf_block_pad_ratio_limit"] = float(pad_ratio_limit)
+            debug_stats["buf_block_cost_ratio_limit"] = float(cost_ratio_limit)
+
+        if bool(processed.any()):
+            return processed
+        return None
+
     def _search_csr_buffered_chunk(
         self,
         q: torch.Tensor,
@@ -1988,9 +2218,31 @@ class IndexIVFFlat(IndexBase):
             )
             best_ids.fill_(-1)
             return best_scores, best_ids
+
+        # Prefer blocked batching (bmm) to reduce per-list matmul/topk calls on GPU.
+        processed: torch.Tensor | None = None
+        if self._csr_buf_blocked_enabled and self.metric == "l2" and self.device.type != "cpu":
+            with torch.autograd.profiler.record_function("CSR_BUF_BLOCKED"):
+                processed = self._search_csr_buffered_fill_tasks_blocked(
+                    q_tasks,
+                    q2_tasks,
+                    tasks_q,
+                    task_sizes,
+                    groups_cpu,
+                    k,
+                    task_scores=task_scores,
+                    task_packed=task_packed,
+                    fill=fill,
+                    debug_stats=debug_stats,
+                )
+            # Keep processing remaining groups in the per-list loop.
+            if processed is not None and debug_stats is not None:
+                debug_stats["buf_block_enabled"] = int(debug_stats.get("buf_block_enabled", 0)) + 1
         vec_chunk = self._csr_vec_chunk(buffered=True)
         groups_np = groups_cpu.numpy()
-        for l, start, end, max_len in groups_np:
+        for group_row, (l, start, end, max_len) in enumerate(groups_np):
+            if processed is not None and bool(processed[group_row]):
+                continue
             a = int(self._list_offsets_cpu[int(l)])
             b = int(self._list_offsets_cpu[int(l) + 1])
             if b <= a:
@@ -2032,11 +2284,38 @@ class IndexIVFFlat(IndexBase):
                         debug_stats["matmul_total_cols"] = int(debug_stats.get("matmul_total_cols", 0)) + int(
                             x.shape[0]
                         )
-                    prod = torch.matmul(qg, x.transpose(0, 1))
                     if self.metric == "l2":
                         x2 = self._packed_norms[a:b]
-                        dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
-                        dist = dist.clamp_min_(0)
+                        qg2 = qg * -2.0
+                        use_tbuf = False
+                        list_len = b - a
+                        if self._expl_tbuf_enabled and self.device.type == "cuda":
+                            if qg.shape[0] >= 128 and 2048 <= list_len <= 4096:
+                                if (qg.shape[0] * list_len) >= 262_144:
+                                    use_tbuf = True
+                        if use_tbuf:
+                            if debug_stats is not None:
+                                debug_stats["tbuf_fires"] = int(debug_stats.get("tbuf_fires", 0)) + 1
+                                debug_stats["tbuf_bytes"] = int(debug_stats.get("tbuf_bytes", 0)) + int(
+                                    self.d * list_len * x.element_size()
+                                )
+                                q_rows = int(qg.shape[0])
+                                prev_qmax = int(debug_stats.get("tbuf_qrows_max", 0))
+                                if q_rows > prev_qmax:
+                                    debug_stats["tbuf_qrows_max"] = q_rows
+                                prev_lmax = int(debug_stats.get("tbuf_len_max", 0))
+                                if list_len > prev_lmax:
+                                    debug_stats["tbuf_len_max"] = int(list_len)
+                            with torch.autograd.profiler.record_function("CSR_BUF_EXPL_TBUF_COPY"):
+                                x_t = self._workspace.ensure(
+                                    "csr_buf_xT", (self.d, list_len), dtype=x.dtype, device=self.device
+                                )
+                                x_t.copy_(x.transpose(0, 1))
+                            with torch.autograd.profiler.record_function("CSR_BUF_EXPL_TBUF_MM"):
+                                dist = torch.matmul(qg2, x_t)
+                        else:
+                            dist = torch.matmul(qg2, x.transpose(0, 1))
+                        dist.add_(x2.unsqueeze(0))
                         topk = min(k, dist.shape[1])
                         if topk < k:
                             task_scores[s:e].fill_(fill)
@@ -2047,7 +2326,11 @@ class IndexIVFFlat(IndexBase):
                             out_scores = task_scores[s:e]
                             out_packed = task_packed[s:e]
                         torch.topk(dist, topk, largest=False, dim=1, sorted=False, out=(out_scores, out_packed))
+                        if q2g is not None:
+                            out_scores.add_(q2g)
+                        out_scores.clamp_min_(0)
                     else:
+                        prod = torch.matmul(qg, x.transpose(0, 1))
                         topk = min(k, prod.shape[1])
                         if topk < k:
                             task_scores[s:e].fill_(fill)
@@ -2088,14 +2371,16 @@ class IndexIVFFlat(IndexBase):
                         prod = torch.matmul(qg, x.transpose(0, 1))
                         if self.metric == "l2":
                             x2 = self._packed_norms[p:pe]
-                            dist = q2g + x2.unsqueeze(0) - (2.0 * prod)
-                            dist = dist.clamp_min_(0)
+                            prod.mul_(-2.0).add_(x2.unsqueeze(0))
                             if group_sizes is not None:
                                 pos = torch.arange(p - a, pe - a, device=self.device)
                                 mask = pos.unsqueeze(0) >= group_sizes.unsqueeze(1)
-                                dist.masked_fill_(mask, float("inf"))
-                            topk = min(k, dist.shape[1])
-                            cand_scores, cand_j = torch.topk(dist, topk, largest=False, dim=1, sorted=False)
+                                prod.masked_fill_(mask, float("inf"))
+                            topk = min(k, prod.shape[1])
+                            cand_scores, cand_j = torch.topk(prod, topk, largest=False, dim=1, sorted=False)
+                            if q2g is not None:
+                                cand_scores.add_(q2g)
+                            cand_scores.clamp_min_(0)
                         else:
                             topk = min(k, prod.shape[1])
                             cand_scores, cand_j = torch.topk(prod, topk, largest=True, dim=1, sorted=False)
@@ -2167,12 +2452,24 @@ class IndexIVFFlat(IndexBase):
             target_bytes = 64 * 1024 * 1024
         return max(1, int(target_bytes // max(1, elem_size)))
 
-    def _csr_task_budget(self) -> int:
+    def _csr_task_budget(
+        self,
+        *,
+        max_codes: int,
+        per_list_sizes: torch.Tensor | None,
+        k: int,
+    ) -> int:
         if self.device.type == "cpu":
             return 20_000
-        if self._max_codes == 0:
-            return 700_000
-        return 200_000
+        if max_codes == 0 and per_list_sizes is None:
+            base = 1_200_000
+        else:
+            base = 200_000
+        elem_size = torch.tensor([], dtype=self.dtype).element_size()
+        bytes_per_task = max(1, int(k)) * (elem_size + 8)
+        max_task_bytes = 256 * 1024 * 1024
+        max_tasks = max(1, int(max_task_bytes // max(1, bytes_per_task)))
+        return max(1, min(base, max_tasks))
 
     def _bytes_per_vector(self) -> int:
         elem_size = torch.tensor([], dtype=self.dtype).element_size()
@@ -2186,10 +2483,18 @@ class IndexIVFFlat(IndexBase):
         bytes_per_vec = self._bytes_per_vector()
         return max(1, int(target_bytes // bytes_per_vec))
 
-    def _iter_query_chunks_csr(self, nq: int, *, nprobe: int) -> list[tuple[int, int]]:
+    def _iter_query_chunks_csr(
+        self,
+        nq: int,
+        *,
+        nprobe: int,
+        max_codes: int,
+        per_list_sizes: torch.Tensor | None,
+        k: int,
+    ) -> list[tuple[int, int]]:
         if nq <= 0:
             return [(0, 0)]
-        budget = self._csr_task_budget()
+        budget = self._csr_task_budget(max_codes=max_codes, per_list_sizes=per_list_sizes, k=k)
         probe = max(1, min(int(nprobe), self._nlist))
         chunk = max(1, budget // probe)
         chunk = min(chunk, nq)

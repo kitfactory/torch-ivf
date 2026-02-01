@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import torch
 
 import pytest
@@ -282,6 +283,9 @@ def test_rebuild_lists_residual_norm_orders_within_list():
 
 
 def test_ivf_csr_blocked_groups_matches_unblocked():
+    if os.environ.get("TORCH_IVF_RUN_GPU_EXPERIMENTAL_TESTS") != "1":
+        pytest.skip("Set TORCH_IVF_RUN_GPU_EXPERIMENTAL_TESTS=1 to run experimental GPU tests.")
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA/ROCm device is required for blocked CSR test.")
     d = 32
@@ -321,3 +325,42 @@ def test_ivf_csr_blocked_groups_matches_unblocked():
     d_list, i_list, _ = run(1)
     assert torch.allclose(d_block.cpu(), d_list.cpu(), atol=1e-5)
     assert torch.equal(i_block.cpu(), i_list.cpu())
+
+
+def test_ivf_csr_buffered_blocked_matches_unblocked_exact():
+    # This test exercises an optional, experimental GPU batching path.
+    # On some ROCm/Windows setups, pytest can hang intermittently around GPU teardown.
+    # Gate it behind an explicit opt-in env var so the default suite stays reliable.
+    if os.environ.get("TORCH_IVF_RUN_GPU_EXPERIMENTAL_TESTS") != "1":
+        pytest.skip("Set TORCH_IVF_RUN_GPU_EXPERIMENTAL_TESTS=1 to run experimental GPU tests.")
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/ROCm device is required for buffered-blocked CSR test.")
+
+    d = 32
+    xb, xq = _toy_data(d=d, nb=4096, nq=1024, seed=11)
+    device = torch.device("cuda")
+    xb = xb.to(device)
+    xq = xq.to(device)
+
+    index = IndexIVFFlat(d, nlist=64, nprobe=16, device=device)
+    index.train(xb[:2048], generator=torch.Generator(device="cpu").manual_seed(123))
+    index.add(xb)
+    index.search_mode = "csr"
+    index._csr_small_batch_avg_group_threshold = 0.0
+
+    # Force the blocked-buffered path to be considered.
+    index._csr_buf_blocked_enabled = True
+    index._csr_list_block_size = lambda: 16
+    index._csr_block_pad_ratio_limit = lambda: 10.0
+    index._csr_block_cost_ratio_limit = lambda: 100.0
+    index._csr_block_max_elements = lambda: 1_000_000_000
+
+    index._csr_buf_blocked_enabled = False
+    d_ref, i_ref = index.search(xq, k=10)
+
+    index._csr_buf_blocked_enabled = True
+    d_blk, i_blk = index.search(xq, k=10)
+
+    assert torch.allclose(d_ref.cpu(), d_blk.cpu(), atol=1e-5)
+    assert torch.equal(i_ref.cpu(), i_blk.cpu())

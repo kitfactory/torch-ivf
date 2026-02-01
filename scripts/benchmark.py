@@ -24,6 +24,9 @@ class BenchmarkResult:
     backend: str
     search_mode: str
     chosen_mode: str
+    # Extra stats from IndexIVFFlat.last_search_stats (debug_stats=True).
+    # 追加統計: IndexIVFFlat.last_search_stats（debug_stats=True）をそのまま保持する。
+    search_stats: Optional[dict[str, float | int | str]]
     auto_avg_group_size: Optional[float]
     auto_threshold: Optional[float]
     auto_search_avg_group_threshold: Optional[float]
@@ -210,6 +213,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchmarkResult:
         backend=backend,
         search_mode=args.search_mode,
         chosen_mode=chosen_mode,
+        search_stats=stats if stats else None,
         auto_avg_group_size=stats.get("auto_avg_group_size"),
         auto_threshold=stats.get("auto_threshold"),
         auto_search_avg_group_threshold=stats.get("auto_search_avg_group_threshold"),

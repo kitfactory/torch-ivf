@@ -10,7 +10,7 @@
 1. L2 / Inner Product 対応の `IndexFlatL2`, `IndexFlatIP`, `IndexIVFFlat`.
 2. PyTorch Tensor ベースの `train`, `add`, `add_with_ids`, `search`, `range_search`.
 3. CPU / CUDA / ROCm / DirectML へのデバイス移動 (`to`, `cpu`, `cuda`, `rocm`, `dml`).
-4. PyTorch `state_dict` 形式でのシリアライズ (`save`, `load`, `from_state_dict`).
+4. PyTorch `state_dict` 形式でのシリアライズ（現状は `IndexIVFFlat` のみ: `state_dict`, `load_state_dict`, `save`, `load`）。
 5. `scripts/benchmark.py` / `scripts/benchmark_faiss_cpu.py` によるベンチマーク計測と JSON 収集。
 
 ### 2.2 Excluded (v0)
@@ -21,7 +21,7 @@
 ## 3. Terminology
 - `xb`: base vectors (float16/float32/bfloat16 Tensor).
 - `xq`: query vectors.
-- `quantizer`: coarse centroid を保持する `IndexFlat*`.
+- `quantizer`: coarse centroid を保持する仕組み。現実装（v0.1.0）では `quantizer` オブジェクトは公開せず、`IndexIVFFlat` が centroid を保持する。
 - `list_offsets`: inverted list の prefix sum。`packed_embeddings` と組み合わせて candidate を取り出す。
 
 ## 4. Module Layout & API
@@ -29,14 +29,15 @@
 torch_ivf/
  ├─ __init__.py
  ├─ index/
+ │   ├─ __init__.py
  │   ├─ base.py        # IndexBase とデバイス共通ロジック
  │   ├─ flat.py        # IndexFlatL2 / IndexFlatIP
  │   └─ ivf_flat.py    # IndexIVFFlat
- ├─ nn/kmeans.py       # mini-batch k-means
+ ├─ nn/
+ │   ├─ __init__.py
+ │   └─ kmeans.py      # mini-batch k-means
  ├─ utils/
- │   ├─ serialization.py
- │   └─ tensor_ops.py
- └─ typing.py
+ │   └─ __init__.py
 ```
 
 | クラス | 役割 | Faiss 対応 |
@@ -51,24 +52,27 @@ torch_ivf/
 - `device: torch.device | str | None` (None の場合は PyTorch 既定)
 - `dtype: torch.dtype` (既定 `torch.float32`)
 
-共通属性: `d`, `ntotal`, `nlist`, `nprobe`, `max_codes`, `device`, `is_trained`.
+共通属性: `d`, `ntotal`, `device`, `dtype`, `metric`, `is_trained`。
+補足: `nlist/nprobe/max_codes/search_mode/approximate_mode/last_search_stats` などは `IndexIVFFlat` 固有の属性である。
 
 ## 5. Behavioral Requirements
 
 ### 5.1 Data validation
-- `xb`, `xq` の dtype は `float16`, `float32`, `bfloat16` を許可。内部 centroid は常に float32 で保持。
+- `xb`, `xq` の dtype は `float16`, `float32`, `bfloat16` を許可。
+  - centroid は index 内部で保持する（現実装では検索時に `IndexIVFFlat.dtype` へキャストして距離計算を行う）。
 - `tensor.shape[1] == d` を強制。違反時は `ValueError`。
-- 入力 Tensor は `contiguous()` に変換し、必要に応じて `to(device)` する。`pin_memory` は呼び出し側の責務。
+- 入力 Tensor は `to(device)` でデバイスへ移動する（`contiguous()` は強制しない。k-means 内部では `xb.contiguous()` を使用する）。`pin_memory` は呼び出し側の責務。
 
 ### 5.2 Device semantics
 - コンストラクタで device を指定しない場合は PyTorch 既定 device を利用。
-- `IndexBase.to(device)` は内部 Tensor（centroids、packed embeddings、ids、offsets）を再配置した新インスタンスを返す。
+- `IndexBase.to(device)` は、`device is None` の場合は self を返し、それ以外は内部 Tensor（centroids、packed embeddings、ids、offsets）を再配置したコピーを返す。
 - `cuda` / `rocm` / `dml` メソッドも `to(torch.device("cuda"))` 等の薄いラッパー。
+- 補足: PyTorch では ROCm も `torch.device("cuda")` として見える（`torch.version.hip` が真になる）ため、ROCm の実体は `device.type == "cuda"` の分岐で扱う。
 - 1 つのインスタンスは基本的に 1 デバイス専用とし、`train/add/search` を跨いで頻繁に移動しない設計とする。
 
 ### 5.3 Training
-- `IndexIVFFlat.train(xb)` は mini-batch k-means (最大 20 outer iters, tol=1e-3) を利用。
-- `nlist` の既定は `min(1024, max(1, int(sqrt(ntotal))))`。ユーザー指定を優先。
+- `IndexIVFFlat.train(xb)` は mini-batch k-means（既定: 最大 25 iters, `tol=1e-3`）を利用。
+- `nlist` の既定は 1024 とする（現実装では `ntotal` からの自動推定は行わない）。
 - 収束後に `is_trained=True`。未学習のまま `add` / `search` を呼ぶと `RuntimeError`。
 
 ### 5.4 Add / Add with IDs
@@ -81,7 +85,7 @@ torch_ivf/
    - `_top_probed_lists(xq)` が `centroid_scores = pairwise(xq, centroids)` → `torch.topk(..., nprobe)` を行い、`top_lists: (nq, nprobe)` を返す。
 2. inverted list の実サイズから “実際の候補数” を見積もってチャンク分割する。  
    - `list_sizes = list_offsets[1:] - list_offsets[:-1]` を使い、`candidates_per_query = list_sizes[top_lists].sum(dim=1)` を計算する。
-   - `_iter_query_chunks(candidates_per_query)` が候補数合計が予算（CPU=400k / GPU=250k candidates）を超えないように `(start, end)` のチャンク列を作る。
+   - `_iter_query_chunks(candidates_per_query)` が候補数合計が予算（概ね CPU: 512MiB、GPU: 256MiB 相当。CUDA/ROCm では空き VRAM の 10% を上限として考慮）を超えないように `(start, end)` のチャンク列を作る。
 3. 各チャンクで `_collect_candidate_vectors_from_lists(top_lists_chunk)` を呼び出し、候補ベクトル・ID・（L2 用）事前計算済みノルムをまとめて gather する。  
    - `repeat_interleave` と prefix sum を使って、候補を **クエリ順に連結**した `(total_candidates, d)` テンソルにする（巨大な `scatter_add_` でスコア行列を構築しない）。
 4. スコア計算は “クエリの複製” を避け、L2 ではキャッシュしたノルムを使う。  
@@ -90,7 +94,7 @@ torch_ivf/
 5. 各クエリで `torch.topk(k)` を取り、不足分は距離 `inf/-inf` と ID `-1` で埋める。
 - `range_search` も同じ gather 結果を使い、半径条件でフィルタした件数を `lims` に反映する（可変長出力）。
 - `max_codes > 0` の場合は、probe 順に inverted list を走査し、クエリあたりのスキャン件数が `max_codes` を超えないように候補数を切り詰める（Faiss の `max_codes` に相当）。
-- AMP/Autocast 中でも挙動が変わらないよう、入力 dtype に合わせて計算、内部の centroid や統計は float32 で保持。
+- AMP/Autocast 中でも挙動が変わらないよう、検索時の距離計算は `IndexIVFFlat.dtype` にキャストして行う（内部キャッシュも同 dtype で保持する。float32 への強制は行わない）。
 - `torch.compile` に依存せず PyTorch eager 実装のみで動くことを保証する。
 
 #### 5.5.1 性能ボトルネックの分解（設計メモ）
@@ -170,11 +174,11 @@ IVFFlat で「probed lists の中で厳密に top-k」を求める限り、原�
 `IndexIVFFlat.search_mode` で検索パスを切り替える（既定: `"matrix"`）。
 
 - `"matrix"`: 既存の固定形状 `index_matrix` + batched gather + 1 回の巨大 `topk`。
-- `"csr"`: CSR/slice + online topk（vNext）。
-- `"auto"`: GPU?ROCm/CUDA????????`avg_group = (nq * nprobe / nlist)` ????`avg_group >= auto_search_avg_group_threshold * (nlist / 512)` ??? "csr"?????? "matrix"?
+- `"csr"`: CSR（list 単位）+ online topk + merge（現行の高スループット経路）。
+- `"auto"`: GPU（CUDA/ROCm, `device.type == "cuda"`）の場合のみ、`avg_group_size = (nq * probe) / nlist`（`probe = min(nprobe, nlist)`）を計算し、`avg_group_size >= auto_search_avg_group_threshold * (nlist / 512)` のとき `"csr"`、それ以外は `"matrix"` を選ぶ。
 
 補足:
-- `auto_search_avg_group_threshold` ??? `8.0`?`nlist=512, nprobe=32` ?? `nq>=128` ? "csr" ?????
+- `auto_search_avg_group_threshold` の既定は `8.0`。例: `nlist=512, nprobe=32` なら、概ね `nq>=128` で `"csr"` を選びやすい。
 - CPU では `"auto"` は `"matrix"` と同等に扱う（安定性優先）。
 
 #### 5.5.4 小バッチ最適化（vNext.1）
@@ -383,6 +387,8 @@ def search_ivf_csr(
 
 ### 5.7 Benchmark artifacts
 - `scripts/benchmark.py`（torch-ivf）と `scripts/benchmark_faiss_cpu.py`（faiss-cpu）で取得した結果を JSON Lines (`benchmarks/benchmarks.jsonl`) に追記する。
+- `scripts/benchmark_sweep_ivf_params.py` は torch-ivf（GPU）と faiss-cpu を **同一データ**で比較し、`(nlist, nprobe)` の候補をスイープする用途で使う。
+  - 注意: faiss-cpu 側の dtype は実質 `float32` 固定であり、torch 側のみ `float16/float32/bfloat16` を選べる（レコードの `dtype` は torch 側の設定を指す）。
 - `scripts/benchmark_sweep_max_codes.py` は `max_codes` の速度/精度（自己比較）を複数点で記録する用途で使う。
 - `scripts/benchmark_sweep_auto_threshold.py` は `auto_search_avg_group_threshold` をスイープし、`recall_at_k_vs_unlimited` と `qps_recall` を記録する。
 - `scripts/score_auto_threshold.py` は JSONL から閾値のスコアを計算し、重み付きランキングを出力する。
@@ -402,6 +408,8 @@ def search_ivf_csr(
 - CPU では 100ms 以内（Ryzen AI Max+ 395 のような高帯域 CPU を想定）。
 - メモリオーバーヘッドは Faiss `IndexIVFFlat` + 10% に抑える。
 - 代表構成 (`nb=262144, nq=512, nlist=512, nprobe=32, k=20`) を常設し、CPU / ROCm / faiss-cpu の 3 つを必ず測定する。
+- 追加の代表構成（throughput 領域）: `nb=262144, nq=19600, nlist=512, nprobe=32, k=20, max_codes=0` を測定し、**faiss-cpu 比のスループット倍率**も追跡する。
+  - 目標: ROCm(GPU) の `dtype=float16` で `faiss-cpu(float32)` 比 **15x 以上**（Exact / `max_codes=0`）。
 
 ## 7. Compile Policy
 - `torch.compile` / `Index.compile()` に頼らない。Windows + ROCm でのコンパイル失敗（MSVC Unicode 問題等）を避けるため。
@@ -412,6 +420,7 @@ def search_ivf_csr(
 - ゴールデンテスト: Faiss (CPU) の `search` 結果と一致することを確認する。
 - 各デバイス（CPU / CUDA / ROCm / DML）で `train → add → search` の round-trip を実行するテストを用意する。
 - `torch.use_deterministic_algorithms(True)` でも通るよう、乱数に `torch.Generator` + seed を使う。
+- GPU の実験的テスト（blocked batching 等）は、デフォルトの安定性を優先して環境変数で opt-in にする（例: `TORCH_IVF_RUN_GPU_EXPERIMENTAL_TESTS=1`）。
 
 ## 9. Migration Notes
 - `faiss.IndexFlatL2(d)` → `torch_ivf.index.IndexFlatL2(d)` のように置き換える。Tensor は PyTorch Tensor に統一。
@@ -467,17 +476,19 @@ def search_ivf_csr(
 ### 12.7 SearchParams / profile（Spec ID: PERF-6c）
 - 前提: `IndexIVFFlat.search` は既存呼び出しとの互換性を維持する。
 - 条件: `search(xq, k, *, params: Optional[SearchParams] = None)` を呼び出す。
-- 振る舞い: `params is None` の場合は `profile="speed"` 相当として扱う。`profile="exact"` は PERF-6a/6b を無効化し、`profile="speed"` は PERF-6a を有効化し PERF-6b を無効化する。`profile="approx"` は PERF-6a と PERF-6b を有効化する。`profile="approx_fast" / "approx_balanced" / "approx_quality"` は近似プリセットを有効化し、`candidate_budget` と `use_per_list_sizes` の既定を上書きする。`params` の明示的な値は profile の既定より優先する。
-- 補足: `profile="exact"` は「近似を行わない」を意味し、結果不変の最適化（キャッシュ/ワークスペース/安全剪定）は許容する。
+- 振る舞い（現実装）:
+  - `params is None` の場合、`IndexIVFFlat` の設定（`nprobe/max_codes/approximate_mode`）と既定値から検索設定を解決する。
+  - `profile` は入力バリデーション用の値であり、`exact/speed/approx` 自体は挙動を切り替えない（v0.1.0）。
+  - `profile="approx_fast" / "approx_balanced" / "approx_quality"` は近似プリセットとして扱い、`approximate=True` と `use_per_list_sizes=True` を適用する。`candidate_budget` が未指定の場合のみ既定値（32,768 / 65,536 / 131,072）を補う。
 - SearchParams の構成（後方互換）:
   - `profile: Literal["exact","speed","approx","approx_fast","approx_balanced","approx_quality"] = "speed"`
-  - `safe_pruning: bool = True`（L2 のみ有効）
+  - `safe_pruning: bool = True`（現実装では効果なし。将来の予約）
   - `approximate: bool = False`
   - `nprobe: Optional[int] = None`
   - `max_codes: Optional[int] = None`
   - `candidate_budget: Optional[int] = None`
   - `budget_strategy: Literal["uniform","distance_weighted"] = "distance_weighted"`
-  - `list_ordering: Optional[Literal["none","residual_norm_asc","proj_desc"]] = None`
+  - `list_ordering: Optional[Literal["none","residual_norm_asc","proj_desc"]] = None`（v0.1.0/P1 では `residual_norm_asc` のみ実装）
   - `rebuild_policy: Literal["manual","auto_threshold"] = "manual"`
   - `rebuild_threshold_adds: int = 0`
   - `dynamic_nprobe: bool = False`
@@ -486,8 +497,8 @@ def search_ivf_csr(
   - `strict_budget: bool = False`
   - `use_per_list_sizes: bool = False`
 - `debug_stats: bool = False`
-- `debug_stats=True` ???????????? `IndexIVFFlat.last_search_stats` ??????
-- 解決順序: `profile` は既定値テンプレとして使い、`IndexIVFFlat` の設定を上書きしない。明示的な SearchParams の値は `IndexIVFFlat` の設定より常に優先する。
+- `debug_stats=True` の場合、`IndexIVFFlat.last_search_stats` に統計情報（選択経路や予算など）を記録する。
+- 解決順序: 明示的な SearchParams の値は `IndexIVFFlat` の設定より常に優先する。`profile` は基本的に情報値だが、`approx_*` の場合は `approximate/use_per_list_sizes` を上書きし、`candidate_budget` は未指定時のみ補完する。
 - 近似プリセット: `profile="approx_fast"` は `candidate_budget=32768`、`profile="approx_balanced"` は `candidate_budget=65536`、`profile="approx_quality"` は `candidate_budget=131072` を既定とし、`use_per_list_sizes=True` を適用する。`candidate_budget` は per-list cap として解釈する。
 - 入力バリデーション: `nprobe` は 1 以上、`max_codes` は 0 以上でなければならない。`candidate_budget`, `min_codes_per_list`, `max_codes_cap_per_list`, `rebuild_threshold_adds` は 0 以上でなければならない。`nprobe > nlist` の場合は `nprobe_eff = nlist` に clamp する。
 
@@ -503,14 +514,16 @@ def search_ivf_csr(
 ### 12.9 Safe pruning（L2）（Spec ID: PERF-6a.1）
 - 前提: 結果不変（Exact）のまま候補削減を行いたい。
 - 条件: `metric="l2"` かつ `safe_pruning=True` の場合。
-- 振る舞い: list ごとに `list_radius`（centroid からの最大残差ノルム上界）を保持し、`lb(l) = max(0, ||q - c_l|| - r_l)^2` を用いて `kth_best` より大きい list をスキップする。結果は不変とする。
-- 補足: `metric="ip"` の場合は安全な下界設計が困難なため無効化する。
+- 振る舞い（現実装）: v0.1.0 では `safe_pruning` は **受け付けるが効果はない**（検索結果にも速度にも影響しない）。
+- 振る舞い（将来）: list ごとに `list_radius`（centroid からの最大残差ノルム上界）を保持し、`lb(l) = max(0, ||q - c_l|| - r_l)^2` を用いて `kth_best` より大きい list をスキップする（結果不変）。
+- 補足: `metric="ip"` の場合は Phase 2 で別途定義する。
 
 ### 12.10 近似モード（デフォルトOFF）（Spec ID: PERF-6b）
 - 前提: 速度優先のために recall の低下を許容できる場合がある。
-- 条件: `approximate=True` または `profile="approx"` を明示的に指定する場合。
+- 条件: `approximate=True`（または `IndexIVFFlat.approximate_mode=True`）を明示的に指定する場合、または `profile="approx_fast" / "approx_balanced" / "approx_quality"` を指定する場合。
 - 振る舞い: PERF-6b の各ノブは **デフォルト OFF** とし、明示的に有効化した場合のみ適用する。結果の精度低下は受け入れ基準（品質ゲート）で管理する。
 - 補足: `approximate=True` でも `candidate_budget` と `max_codes` が共に無制限の場合は結果不変になり得るが、期待される速度向上は限定的となる。
+- 補足（現実装）: `profile="approx"` は情報値であり、近似の ON/OFF 自体は切り替えない（近似は `approximate` によって決まる）。
 
 ### 12.11 候補予算配分（Spec ID: PERF-6b.1）
 - 前提: `approximate=True` で候補削減を行う。
@@ -536,18 +549,20 @@ def search_ivf_csr(
 ### 12.12 list ordering / rebuild（Spec ID: PERF-6b.2）
 - 前提: `approximate=True` かつ `max_codes` / `candidate_budget` により partial scan が発生する。
 - 条件: `list_ordering` と `rebuild_policy` を解釈する。
-- 振る舞い: `list_ordering=None` の場合は metric により既定値を選ぶ（L2 は `residual_norm_asc`、IP は `proj_desc`）。`list_ordering="none"` の場合は並べ替えを行わない。
+- 振る舞い（現実装）: v0.1.0（Phase P1）では `metric="l2"` のみ対象とし、`list_ordering` は `residual_norm_asc` のみをサポートする（`proj_desc` は Phase 2 で扱う）。
+  - `list_ordering=None` の場合、`approximate=True` かつ `metric="l2"` では既定で `residual_norm_asc` を適用する。
+  - `list_ordering="none"` は並べ替えを行わない（内部的には `None` と同義）。
   - `residual_norm_asc`: L2 の場合、`r = x - c` の `||r||` 昇順で並べる。
-  - `proj_desc`: IP の場合、`x·c_hat` 降順で並べる（`c_hat` は centroid の正規化）。
 - `rebuild_policy`:
   - `manual`: ユーザーが `rebuild_lists()` を呼ぶまで並べ替えを行わない。
-  - `auto_threshold`: `add` の累積が `rebuild_threshold_adds` を超えたら rebuild を促す（自動実行は任意）。
-- 補足: 追加データは unsorted tail として保持し、search 時は sorted 領域と tail を別枠で読み分ける（P1 ではこの挙動を採用する）。
+  - `auto_threshold`: `add` の累積が `rebuild_threshold_adds` を超えたら `search` 内で rebuild を実行できる。
+- 補足（現実装）: v0.1.0 では “unsorted tail” を保持しない。`rebuild_lists()` は index の `packed_embeddings/packed_norms/list_ids` を **その場で並べ替える**。
 
 ### 12.13 品質ゲート（Spec ID: PERF-6b.3）
 - 前提: `approximate=True` の設定を出荷する。
 - 条件: `recall@k` を **同一 IVF・`max_codes=0`・`approximate=False`** のベースラインと比較する。
-- 振る舞い: `candidate_budget` のプリセットに対して下限を満たさない設定は無効化または fallback する。
+- 振る舞い（現実装）: v0.1.0 では品質ゲートによる自動無効化 / fallback は行わない（ユーザーがベンチ結果を見て設定する）。
+- 振る舞い（将来）: `candidate_budget` のプリセットに対して下限を満たさない設定は無効化または fallback する。
   - `approx_64k`: `recall@k >= 0.995`
   - `approx_32k`: `recall@k >= 0.990`
   - `approx_16k`: `recall@k >= 0.980`
@@ -556,10 +571,12 @@ def search_ivf_csr(
 ### 12.14 subcluster bound（Spec ID: PERF-6a.2）
 - 前提: 結果不変（Exact）で候補削減を行いたい。
 - 条件: list 内を `k_sub` で分割し、`sub_centroid` と `sub_radius` を保持する。
-- 振る舞い: L2 では `lower_bound(q, sub) = ||q - sub_centroid|| - sub_radius` を用いて、現在の k 番目より大きい subcluster をスキップする（結果は不変）。
+- 振る舞い（現実装）: v0.1.0 では未実装。
+- 振る舞い（将来）: L2 では `lower_bound(q, sub) = ||q - sub_centroid|| - sub_radius` を用いて、現在の k 番目より大きい subcluster をスキップする（結果は不変）。
 - 補足: IP での上界/下界は別途定義が必要なため、初期実装は L2 のみ対象とする。
 
 ### 12.15 anchors プレフィルタ（Spec ID: PERF-6b.4）
 - 前提: `approximate=True` で list の候補数をさらに減らしたい。
 - 条件: 各 list に小さな代表集合（anchors）を保持する。既定は 64 とし、`avg_list_size < 64` の場合は `min(32, avg_list_size)` へ自動縮退する。
-- 振る舞い: anchor の距離で見込みのある list を選び、`candidate_budget` を割り当てる対象を減らす。
+- 振る舞い（現実装）: v0.1.0 では未実装。
+- 振る舞い（将来）: anchor の距離で見込みのある list を選び、`candidate_budget` を割り当てる対象を減らす。

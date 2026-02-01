@@ -26,6 +26,8 @@
 - [ ] candidate_budget sweep（max_codes 畳み込み）で recall/QPS の閾値を確定
 - [x] CSR-large v2（list-block batching）で起動回数を削減
 - [ ] per-list cap（use_per_list_sizes）を CSR-large v2 と組み合わせて本命経路にする
+- [x] faiss-cpu 比 15x（throughput 領域）の代表値を確定する
+  - `scripts/benchmark_sweep_ivf_params.py --dtype float16` で torch-ivf(GPU) と faiss-cpu を同一データで比較し、`benchmarks/benchmarks.jsonl` に記録する（2026-02-01: ~18.6x）。
 
 ## Now（次に潰す：優先順）
 
