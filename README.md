@@ -4,7 +4,8 @@
 The goal is to support CPU / CUDA / ROCm / DirectML with **the same code** (with a strong focus on Windows + ROCm).
 
 - 🔁 **Easy migration with a Faiss-like API** (equivalent APIs for `IndexFlatL2` / `IndexFlatIP`, and `IndexIVFFlat`)
-- 📈 **Up to 6.83x vs faiss-cpu in the throughput regime** (`nq=19600`: 69,632 / 10,196 ~6.83x)
+- 📈 **18.6x vs faiss-cpu (throughput, exact)** (`nq=19600`, `search_mode=csr`, torch-ivf `float16` on ROCm GPU vs faiss-cpu `float32`: 195,175 / 10,479 ~18.6x)
+- 📈 **6.83x vs faiss-cpu (throughput, default-friendly)** (`nq=19600`, `search_mode=auto`, float32: 69,632 / 10,196 ~6.83x)
 - 🧩 **Same code if your PyTorch backend runs** (CPU/CUDA/ROCm/DirectML. *One codebase across backends*)
 - 🧪 **Measured results + repro steps included** (env/jsonl + scripts bundled. *Reproducible benchmarks included*)
 
@@ -51,6 +52,21 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 ---
 
 ## 📊 Benchmarks (representative values)
+
+### Throughput vs faiss-cpu (paired, exact)
+
+> Setup: `nb=262144, train_n=20480, d=128, nlist=512, nprobe=32, k=20, max_codes=0, --warmup 1 --repeat 5`  
+> Updated: `2026-02-01T14:47:02` (`scripts/benchmark_sweep_ivf_params.py`, same base/query for both libraries)
+
+| library | device | dtype | search_mode | QPS |
+|---|---|---|---|---:|
+| torch-ivf | ROCm GPU | float16 | csr | **195,175** |
+| faiss-cpu | CPU | float32 | faiss | 10,479 |
+
+Repro:
+```bash
+uv run python scripts/benchmark_sweep_ivf_params.py --torch-device cuda --torch-search-mode csr --dtype float16 --pairs 512:32 --max-codes 0 --topk 20 --warmup 1 --repeat 5 --faiss-threads -1
+```
 
 > Example setup: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > Environment: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
@@ -193,6 +209,7 @@ python examples/ivf_demo.py --device cuda --verify
 
 - [`scripts/benchmark.py`](scripts/benchmark.py): torch-ivf benchmark (CPU/ROCm). Appends JSON to [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl)
 - [`scripts/benchmark_faiss_cpu.py`](scripts/benchmark_faiss_cpu.py): faiss-cpu reference benchmark
+- [`scripts/benchmark_sweep_ivf_params.py`](scripts/benchmark_sweep_ivf_params.py): sweep `(nlist, nprobe)` and compare torch-ivf vs faiss-cpu on the same data
 - [`scripts/benchmark_sweep_nq.py`](scripts/benchmark_sweep_nq.py): sweep `nq` (tiny-batch vs throughput boundary)
 - [`scripts/benchmark_sweep_max_codes.py`](scripts/benchmark_sweep_max_codes.py): sweep `max_codes` (speed / self-recall)
 - [`scripts/benchmark_sweep_candidate_budget.py`](scripts/benchmark_sweep_candidate_budget.py): sweep `candidate_budget` (approx speed vs recall)

@@ -4,7 +4,8 @@
 CPU / CUDA / ROCm / DirectML を **同一コード**で扱えることを目標にしています（特に Windows + ROCm を重視）。
 
 - 🔁 **Faiss 類似のAPIで移行が簡単**（`IndexFlatL2` / `IndexFlatIP`, `IndexIVFFlat` 相当の API）
-- 📈 **throughput 領域で faiss-cpu を最大 6.83x**（`nq=19600` で 69,632 / 10,196 ~6.83x）
+- 📈 **faiss-cpu 比 18.6x（throughput / Exact）**（`nq=19600`, `search_mode=csr`, torch-ivf は ROCm GPU + `float16`, faiss-cpu は `float32`: 195,175 / 10,479 ~18.6x）
+- 📈 **faiss-cpu 比 6.83x（throughput / 既定寄り）**（`nq=19600`, `search_mode=auto`, float32: 69,632 / 10,196 ~6.83x）
 - 🧩 **PyTorch の backend が動けば同じコードで動く**（CPU/CUDA/ROCm/DirectML。*One codebase across backends*）
 - 🧪 **実測・再現手順あり**（env/jsonl + scripts 同梱。*Reproducible benchmarks included*）
 
@@ -51,6 +52,21 @@ uv run python scripts/score_auto_threshold.py --jsonl benchmarks/benchmarks.json
 ---
 
 ## 📊 実測（代表値）
+
+### throughput vs faiss-cpu（同一データ比較 / Exact）
+
+> 条件: `nb=262144, train_n=20480, d=128, nlist=512, nprobe=32, k=20, max_codes=0, --warmup 1 --repeat 5`  
+> 更新日時: `2026-02-01T14:47:02`（`scripts/benchmark_sweep_ivf_params.py`、torch-ivf / faiss-cpu を同一 base/query で計測）
+
+| library | device | dtype | search_mode | QPS |
+|---|---|---|---|---:|
+| torch-ivf | ROCm GPU | float16 | csr | **195,175** |
+| faiss-cpu | CPU | float32 | faiss | 10,479 |
+
+再現:
+```bash
+uv run python scripts/benchmark_sweep_ivf_params.py --torch-device cuda --torch-search-mode csr --dtype float16 --pairs 512:32 --max-codes 0 --topk 20 --warmup 1 --repeat 5 --faiss-threads -1
+```
 
 > ベンチ条件例: `nb=262144, train_n=20480, nlist=512, nprobe=32, k=20, float32, --warmup 1 --repeat 5`  
 > 実行環境: AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD / Windows 11 / PyTorch ROCm 7.1.52802-561cc400e1  
@@ -184,6 +200,7 @@ python examples/ivf_demo.py --device cuda --verify
 
 - [`scripts/benchmark.py`](scripts/benchmark.py): torch-ivf ベンチ（CPU/ROCm）。JSON を出力し [`benchmarks/benchmarks.jsonl`](benchmarks/benchmarks.jsonl) に追記
 - [`scripts/benchmark_faiss_cpu.py`](scripts/benchmark_faiss_cpu.py): faiss-cpu 参照ベンチ
+- [`scripts/benchmark_sweep_ivf_params.py`](scripts/benchmark_sweep_ivf_params.py): `(nlist, nprobe)` をスイープし、torch-ivf と faiss-cpu を同一データで比較
 - [`scripts/benchmark_sweep_nq.py`](scripts/benchmark_sweep_nq.py): `nq` スイープ（tiny-batch vs throughput の境界）
 - [`scripts/benchmark_sweep_max_codes.py`](scripts/benchmark_sweep_max_codes.py): `max_codes` スイープ（速度/自己比較 recall）
 - [`scripts/benchmark_sweep_candidate_budget.py`](scripts/benchmark_sweep_candidate_budget.py): `candidate_budget` ?????approx ???/recall?
